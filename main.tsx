@@ -843,11 +843,24 @@ export default class VaultSyncPlugin extends Plugin {
   private async applyLocalChanges(changes: Change[], local: Manifest): Promise<boolean> {
     const stale: string[] = [];
     let applied = false;
-    const unchangedSincePlan = async (path: string) =>
-      (await this.vaultHelper.currentSha(path)) === (local[path]?.sha ?? null);
+    // A file is "unchanged since plan" when the disk still has the sha we
+    // planned against. Two no-op cases are not stale: a download whose bytes
+    // are already on disk (written by an earlier run that stopped before
+    // saving its manifest — without this the next run re-downloads, sees a
+    // mismatch, and aborts forever), and a deleteLocal whose file is already
+    // gone.
+    const checkFresh = async (change: Change): Promise<"ok" | "done" | "stale"> => {
+      const current = await this.vaultHelper.currentSha(change.path);
+      if (current === (local[change.path]?.sha ?? null)) return "ok";
+      if (change.type === "download" && current === change.remoteSha) return "done";
+      if (change.type === "deleteLocal" && current === null) return "done";
+      return "stale";
+    };
     for (const change of changes) {
       if (change.type === "download" || change.type === "deleteLocal") {
-        if (!(await unchangedSincePlan(change.path))) {
+        const fresh = await checkFresh(change);
+        if (fresh === "done") continue;
+        if (fresh === "stale") {
           stale.push(change.path);
           continue;
         }
@@ -881,8 +894,9 @@ export default class VaultSyncPlugin extends Plugin {
     }
     if (stale.length) {
       console.warn(`VaultSync: left alone, changed during sync:\n${stale.join("\n")}`);
+      const names = stale.slice(0, 5).join(", ") + (stale.length > 5 ? ", …" : "");
       throw new SyncNeedsUserError(
-        `${stale.length} file${stale.length === 1 ? "" : "s"} changed during sync; run "Sync now".`,
+        `${stale.length} file${stale.length === 1 ? "" : "s"} changed during sync and ${stale.length === 1 ? "was" : "were"} left alone: ${names}.`,
       );
     }
     return applied;
