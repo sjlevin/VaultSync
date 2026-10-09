@@ -29,14 +29,14 @@ import { SyncLogModal } from "./src/ui/sync-log-modal";
 import { DeviceFlowModal } from "./src/ui/device-flow-modal";
 import { VersionRestoreModal } from "./src/ui/version-restore-modal";
 import { SyncStatusView } from "./src/ui/sync-status-view";
-import { SuperSyncSettingTab } from "./src/ui/settings-tab";
+import { VaultSyncSettingTab } from "./src/ui/settings-tab";
 
-export default class SuperSyncPlugin extends Plugin {
+export default class VaultSyncPlugin extends Plugin {
   settings: Settings = DEFAULT_SETTINGS;
   syncManifest: Manifest = {};
   vaultHelper!: VaultHelper;
   githubClient!: GithubClient;
-  settingTab?: SuperSyncSettingTab;
+  settingTab?: VaultSyncSettingTab;
   
   private syncing = false;
   private queued = false;
@@ -77,7 +77,7 @@ export default class SuperSyncPlugin extends Plugin {
         ".git/**",
         ".trash/**",
         `${this.app.vault.configDir}/workspace*.json`,
-        `${this.app.vault.configDir}/plugins/supersync/data.json`,
+        `${this.app.vault.configDir}/plugins/vaultsync/data.json`,
         ".DS_Store",
       ].join("\n");
     }
@@ -92,7 +92,7 @@ export default class SuperSyncPlugin extends Plugin {
 
     this.statusBar = this.addStatusBarItem();
     this.setStatus("GitHub Sync: idle");
-    this.settingTab = new SuperSyncSettingTab(this.app, this);
+    this.settingTab = new VaultSyncSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.registerView(
       VIEW_TYPE_SYNC_STATUS,
@@ -274,7 +274,7 @@ export default class SuperSyncPlugin extends Plugin {
       this.vaultHelper.pluginWrites.add(newPath);
       await this.app.vault.create(
         newPath,
-        `# 🔒 Private Obsidian Vault\n\nThis repository stores a private, secure backup of your Obsidian vault, synchronized automatically by **SuperSync**.\n\n## ⚠️ Important Notes\n* **Keep Private**: This repository contains your personal notes. Do not make this repository public.\n* **Automated Sync**: Files are synced automatically by the SuperSync plugin. Avoid manual modifications to the files directly on GitHub to prevent sync conflicts.\n`,
+        `# 🔒 Private Obsidian Vault\n\nThis repository stores a private, secure backup of your Obsidian vault, synchronized automatically by **VaultSync**.\n\n## ⚠️ Important Notes\n* **Keep Private**: This repository contains your personal notes. Do not make this repository public.\n* **Automated Sync**: Files are synced automatically by the VaultSync plugin. Avoid manual modifications to the files directly on GitHub to prevent sync conflicts.\n`,
       );
     }
   }

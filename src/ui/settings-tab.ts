@@ -1,11 +1,11 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { Settings, DEFAULT_SETTINGS } from "../types";
-import type SuperSyncPlugin from "../../main";
+import type VaultSyncPlugin from "../../main";
 
-export class SuperSyncSettingTab extends PluginSettingTab {
-  plugin: SuperSyncPlugin;
+export class VaultSyncSettingTab extends PluginSettingTab {
+  plugin: VaultSyncPlugin;
 
-  constructor(app: App, plugin: SuperSyncPlugin) {
+  constructor(app: App, plugin: VaultSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -78,11 +78,11 @@ export class SuperSyncSettingTab extends PluginSettingTab {
       .setDesc(
         "One glob-ish pattern per line. Supports exact paths, /** folder prefixes, * wildcards.",
       );
-    ignoreSetting.settingEl.addClass("supersync-ignore-setting");
+    ignoreSetting.settingEl.addClass("vaultsync-ignore-setting");
 
     ignoreSetting.addTextArea((text) => {
       text.inputEl.rows = 6;
-      text.inputEl.addClass("supersync-ignore-textarea");
+      text.inputEl.addClass("vaultsync-ignore-textarea");
       text.setPlaceholder(".git/**\n.trash/**\n.DS_Store");
       text
         .setValue(this.plugin.settings.ignorePatterns)

@@ -1,11 +1,11 @@
 import { ItemView, WorkspaceLeaf, Notice } from "obsidian";
 import { VIEW_TYPE_SYNC_STATUS } from "../constants";
-import type SuperSyncPlugin from "../../main";
+import type VaultSyncPlugin from "../../main";
 
 export class SyncStatusView extends ItemView {
   constructor(
     leaf: WorkspaceLeaf,
-    private plugin: SuperSyncPlugin,
+    private plugin: VaultSyncPlugin,
   ) {
     super(leaf);
   }
@@ -45,7 +45,7 @@ export class SyncStatusView extends ItemView {
       marginBottom: "20px"
     });
 
-    const title = header.createEl("h3", { text: "SuperSync" });
+    const title = header.createEl("h3", { text: "VaultSync" });
     title.setCssStyles({ margin: "0" });
 
     // Status Indicator Badge

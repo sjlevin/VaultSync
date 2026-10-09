@@ -101,7 +101,7 @@ export class DeviceFlowModal extends Modal {
     });
 
     // CSS Spinner
-    this.spinnerEl = leftSide.createDiv({ cls: "supersync-spinner" });
+    this.spinnerEl = leftSide.createDiv({ cls: "vaultsync-spinner" });
 
     this.statusEl = leftSide.createSpan({ text: "Waiting for code entry... " });
     this.statusEl.setCssStyles({
