@@ -1,101 +1,61 @@
-<p align="center">
-  <img src="./icon.png" alt="SuperSync Logo" width="120" height="120" />
-</p>
+# VaultSync
 
-# SuperSync
+**VaultSync** syncs an Obsidian vault with a GitHub repository using the GitHub API — no Git binary needed, so it works out of the box on desktop and mobile (iOS & Android).
 
-<div align="center">
+Forked from [rahuletto/supersync](https://github.com/rahuletto/supersync). Differences from upstream:
 
-[![Install in Obsidian](https://img.shields.io/badge/Install%20in-Obsidian-purple?style=for-the-badge&logo=obsidian&logoColor=white)](obsidian://show-plugin?id=supersync)
+- **Repository-root sync.** The vault syncs to the repository root (plus an optional root-path subfolder), so repo paths mirror vault paths 1:1. The old `<vault-name>/` nesting is still available as a setting.
+- **No content rewriting.** Files are synced byte-for-byte. The plugin never strips frontmatter keys, removes headings, or writes metadata sidecars into your vault.
+- **Bring-your-own GitHub App.** Sign-in uses the device flow against a GitHub App *you* create, with fine-grained permissions — no broad `repo`-scope OAuth, no stranger's client ID. Tokens rotate automatically (8h access / 6-month refresh).
+- **No README replacement.** Your repo's README is yours; the plugin never touches it.
 
-</div>
+## Setup
 
-**SuperSync** is a simple, no-fuss Obsidian plugin that backs up and syncs your vault directly to a private GitHub repository. 
+### 1. Create a GitHub App (a few minutes, once per person)
 
-Unlike other git plugins, SuperSync doesn't need Git installed on your device or command-line setup. It uses GitHub's official APIs under the hood, meaning it works perfectly out-of-the-box on both desktop and mobile (iOS & Android).
+1. Go to GitHub → Settings → Developer settings → **GitHub Apps** → **New GitHub App**.
+2. Name it anything, homepage URL can be your profile. Uncheck webhook **Active**.
+3. Permissions: **Contents → Read and write**.
+4. Check **Enable Device Flow**.
+5. "Where can this GitHub App be installed?" → **Only on this account** (or your org).
+6. Create, then **Install** it on the repository holding your vault.
+7. Note the **Client ID** on the app's settings page.
 
----
+### 2. Install the plugin
 
-## Features
+The easiest path is [BRAT](https://github.com/TfTHacker/obsidian42-brat) (install it from Obsidian's community plugins, then *Add Beta plugin* with this repo's URL). BRAT tracks releases here and auto-updates.
 
-* **Works Everywhere**: Syncs across iOS, Android, macOS, Windows, and Linux without any extra setup.
-* **Easy Login**: Authenticate securely using GitHub's official device code flow. No copy-pasting personal access tokens or passwords—just enter the code in your browser and you're good.
-* **Safe Conflicts**: Never lose your edits. If you modify a file on two devices at once, SuperSync keeps both—it preserves your local changes and saves the remote version with a `.conflict-[timestamp]` suffix.
-* **Flexible Syncing**: Choose to sync automatically on startup, immediately after making changes, or on a timer.
-* **File History**: Browse past versions of any note and restore them directly inside Obsidian.
-* **Simple Ignore Rules**: Keep things clean by ignoring system files (`.DS_Store`), trash folders, or workspace states with standard glob patterns.
+Manual install also works: download `main.js`, `manifest.json`, and `styles.css` from a [release](https://github.com/sjlevin/VaultSync/releases) into `<vault>/.obsidian/plugins/vaultsync/`.
 
----
+### 3. Configure
 
-## Installation
+In Obsidian: Settings → **VaultSync**.
 
-### From the Obsidian Community Store
-If you have Obsidian open, click the badge below to jump straight to the plugin page:
+1. Paste your GitHub App **client ID**.
+2. Click **Sign in with GitHub**, enter the code at `github.com/login/device`.
+3. Set **Repository** to your vault repo (e.g. `vault`), **Branch** to `main`.
+4. Leave **Root path** empty to sync the repository root. Turn on **Nest under vault-name folder** only if you want the old SuperSync layout.
+5. Hit **Sync now**. The first sync downloads the repo into the vault (or uploads the vault, if the repo is empty).
 
-<div align="center">
+Each device signs in separately — tokens are per-device, so you can revoke one without affecting the others. The token itself is stored locally and never synced to the repo.
 
-[![Install in Obsidian](https://img.shields.io/badge/Install-Open%20in%20Obsidian-purple?style=for-the-badge&logo=obsidian&logoColor=white)](obsidian://show-plugin?id=supersync)
+## Sync behavior
 
-</div>
+- **Automatic**: on startup, after file changes (3s debounce), and on a timer (default 5 minutes). All configurable.
+- **Conflicts**: if a file changed on both sides, you choose per file — keep local, keep remote, or keep both (remote saved as `name.conflict-<timestamp>.ext`). Nothing is ever silently overwritten.
+- **Deletes** propagate both ways. **File history**: browse a note's past versions from its commits and restore from the plugin.
+- **Ignore rules**: glob-ish patterns, one per line. Defaults ignore `.git/`, `.trash/`, workspace state, the plugin's own token file, and `.DS_Store`.
 
-### Manual Install
-If you prefer doing it manually:
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [Releases](https://github.com/rahuletto/supersync/releases) page.
-2. Put them in your vault under `.obsidian/plugins/supersync`.
-3. Open Obsidian, go to **Settings > Community plugins**, hit refresh, and enable **SuperSync**.
+## Development
 
----
-
-## Setup Guide
-
-### Step 1: Log In
-1. Go to **Settings > SuperSync** in Obsidian.
-2. Click **Sign in with GitHub**.
-3. Copy the code that pops up and authorize it at [github.com/login/device](https://github.com/login/device).
-
-### Step 2: Start Syncing
-Trigger a sync (click **Sync now** in the settings tab, open the status panel, or press `Mod + S`). 
-SuperSync will automatically look for a repository named `obsidian-sync` in your account. If it doesn't exist yet, it will **automatically create it as a private repository** for you and start backing up your files.
-
-### Step 3: Customize (Optional)
-You can change the default repository name, branch, root folder, and sync interval directly in the settings tab.
-
----
-
-## Local Development
-
-SuperSync is built using **Bun**.
-
-### Prerequisites
-Make sure you have [Bun](https://bun.sh) installed:
-```bash
-curl -fsSL https://bun.sh/install | sh
+```sh
+bun install
+bun run build   # typecheck + bundle to main.js
+bun test        # sync-core unit tests
 ```
 
-### Getting Started
-1. Clone this repository.
-2. Install dependencies:
-   ```bash
-   bun install
-   ```
-3. Create a `.env` file in the root directory:
-   ```env
-   OBSIDIAN_VAULT_PATH=/absolute/path/to/your/Obsidian/Vault
-   DEVICE_FLOW_CLIENT_ID=your_github_oauth_client_id
-   ```
+Cutting a release: run the *Build & Draft Release* workflow with a version number; it bumps the manifests, builds, and drafts a GitHub release with the plugin assets.
 
-### Handy Scripts
-* **Build**: `bun run build`
-* **Test**: `bun run test`
-* **Sync code to vault**: `bun run sync-plugin`
+## License
 
----
-
-## Security & Privacy
-
-* **Direct connection**: The plugin connects directly to GitHub. Your data is never sent to any third-party servers.
-* **Local tokens**: Your GitHub OAuth token is saved locally in your vault (`.obsidian/plugins/supersync/data.json`) and never shared.
-
----
-
-*Developed by [Rahuletto](https://marban.lol).*
+GNU General Public License v3.0 — see [LICENSE](./LICENSE). Forked from [rahuletto/supersync](https://github.com/rahuletto/supersync) ( © Rahuletto, GPL-3.0 ).
