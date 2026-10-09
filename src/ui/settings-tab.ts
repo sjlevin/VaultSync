@@ -26,6 +26,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
             .setWarning()
             .onClick(async () => {
               this.plugin.settings.token = "";
+              this.plugin.settings.refreshToken = "";
+              this.plugin.settings.tokenExpiresAt = 0;
               this.plugin.settings.owner = "";
               await this.plugin.saveSettings();
               this.plugin.refreshStatusViews();
@@ -35,7 +37,9 @@ export class VaultSyncSettingTab extends PluginSettingTab {
     } else {
       new Setting(containerEl)
         .setName("GitHub device sign-in")
-        .setDesc("Uses GitHub OAuth device flow to authorize and log in.")
+        .setDesc(
+          "Uses the GitHub App device flow: enter a short code at github.com/login/device. No tokens to copy.",
+        )
         .addButton((button) =>
           button
             .setButtonText("Sign in with GitHub")
@@ -44,6 +48,11 @@ export class VaultSyncSettingTab extends PluginSettingTab {
         );
     }
     this.repoLink();
+    this.text(
+      "GitHub App client ID",
+      "Client ID of your GitHub App (github.com → Settings → Developer settings → GitHub Apps → your app). The app needs Contents read/write permission and device flow enabled. Everyone using this plugin creates their own app — it takes a few minutes.",
+      "deviceFlowClientId",
+    );
     this.text("Root path", "Optional subfolder inside the repo. Empty means the repository root.", "rootPath");
     this.toggle(
       "Nest under vault-name folder",
@@ -78,6 +87,8 @@ export class VaultSyncSettingTab extends PluginSettingTab {
       "Disabled by default. Enable only if all devices should share installed plugin files.",
       "syncCommunityPlugins",
     );
+    this.text("Commit author name", "Name recorded as the author of sync commits.", "authorName");
+    this.text("Commit author email", "Email recorded as the author of sync commits.", "authorEmail");
     const ignoreSetting = new Setting(containerEl)
       .setName("Ignore patterns")
       .setDesc(

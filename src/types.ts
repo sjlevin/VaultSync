@@ -1,6 +1,10 @@
 
 export interface Settings {
   token: string;
+  /** Rotating refresh token from the GitHub App device flow (empty for PATs). */
+  refreshToken: string;
+  /** Epoch ms when `token` expires (0 = unknown / non-expiring). */
+  tokenExpiresAt: number;
   deviceFlowClientId: string;
   owner: string;
   repo: string;
@@ -46,18 +50,30 @@ export interface DeviceCodeResponse {
   interval: number;
 }
 
+/** Token response from the GitHub App device / refresh flow. */
+export interface DeviceTokenResponse {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  refresh_token_expires_in?: number;
+  error?: string;
+  error_description?: string;
+}
+
 export type ConflictResolution = "local" | "remote" | "both";
 
 export const DEFAULT_SETTINGS: Settings = {
   token: "",
-  deviceFlowClientId: "Ov23libm5xiE4V1rzwBQ",
+  refreshToken: "",
+  tokenExpiresAt: 0,
+  deviceFlowClientId: "Iv23liCtNaUnNil38AO1",
   owner: "",
   repo: "obsidian-sync",
   branch: "main",
   rootPath: "",
   nestUnderVaultName: false,
-  authorName: "VaultSync",
-  authorEmail: "vaultsync@marban.lol",
+  authorName: "Shaun Levin",
+  authorEmail: "sjlevin@users.noreply.github.com",
   autoSync: true,
   syncOnStartup: true,
   syncOnFileChange: true,

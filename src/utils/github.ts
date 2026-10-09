@@ -1,5 +1,5 @@
 import { requestUrl, App, TFile } from "obsidian";
-import { Settings, DeviceCodeResponse, VersionEntry } from "../types";
+import { Settings, DeviceTokenResponse, VersionEntry } from "../types";
 import { RemoteTree, Change, Manifest } from "../sync-core";
 import { VaultHelper } from "./vault";
 import {
@@ -44,6 +44,7 @@ export class GithubClient {
     body?: unknown,
     allowFailure = false,
     baseUrl = "https://api.github.com/",
+    retried = false,
   ): Promise<T & { ok?: boolean; status?: number; message?: string }> {
     const settings = this.getSettings();
     const url = endpoint.startsWith("http")
@@ -63,6 +64,13 @@ export class GithubClient {
       body: body === undefined ? undefined : JSON.stringify(body),
       throw: false,
     });
+    // GitHub App user tokens expire after 8 hours. On a 401, try one token
+    // refresh (if we have a refresh token) and retry the request once.
+    if (response.status === 401 && !retried && settings.refreshToken) {
+      const refreshed = await this.refreshAccessToken();
+      if (refreshed)
+        return this.githubRaw<T>(method, endpoint, body, allowFailure, baseUrl, true);
+    }
     if (response.status < 200 || response.status >= 300) {
       const message =
         typeof response.json === "object" && response.json?.message
@@ -125,38 +133,35 @@ export class GithubClient {
     );
   }
 
-  async pollDeviceToken(
-    clientId: string,
-    device: DeviceCodeResponse,
-  ): Promise<string> {
-    const deadline = Date.now() + device.expires_in * 1000;
-    let interval = Math.max(5, device.interval) * 1000;
-    while (Date.now() < deadline) {
-      await sleep(interval);
-      const result = await this.githubOauth<{
-        access_token?: string;
-        error?: string;
-        error_description?: string;
-      }>("POST", "/login/oauth/access_token", {
-        client_id: clientId,
-        device_code: device.device_code,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      });
-      if (result.access_token) return result.access_token;
-      if (result.error === "authorization_pending") continue;
-      if (result.error === "slow_down") {
-        interval += 5000;
-        continue;
-      }
-      if (result.error === "expired_token")
-        throw new Error("Device code expired. Start sign-in again.");
-      if (result.error === "access_denied")
-        throw new Error("GitHub sign-in was denied.");
-      throw new Error(
-        result.error_description || result.error || "GitHub sign-in failed.",
+  /**
+   * Rotate the GitHub App user token using the stored refresh token.
+   * User tokens expire after 8 hours; refresh tokens after 6 months.
+   * Returns true if a fresh token was stored. No-op for PAT-based setups.
+   */
+  async refreshAccessToken(): Promise<boolean> {
+    const settings = this.getSettings();
+    if (!settings.refreshToken || !settings.deviceFlowClientId.trim())
+      return false;
+    try {
+      const result = await this.githubOauth<DeviceTokenResponse>(
+        "POST",
+        "/login/oauth/access_token",
+        {
+          client_id: settings.deviceFlowClientId.trim(),
+          grant_type: "refresh_token",
+          refresh_token: settings.refreshToken,
+        },
       );
+      if (!result.access_token || !result.refresh_token) return false;
+      settings.token = result.access_token;
+      settings.refreshToken = result.refresh_token;
+      settings.tokenExpiresAt =
+        Date.now() + (result.expires_in ?? 8 * 3600) * 1000;
+      await this.saveSettings();
+      return true;
+    } catch {
+      return false;
     }
-    throw new Error("Device code expired. Start sign-in again.");
   }
 
   async ensureRepositoryReady() {
@@ -436,12 +441,8 @@ export class GithubClient {
   async checkDeviceToken(
     clientId: string,
     deviceCode: string,
-  ): Promise<{ access_token?: string; error?: string; error_description?: string }> {
-    return this.githubOauth<{
-      access_token?: string;
-      error?: string;
-      error_description?: string;
-    }>("POST", "/login/oauth/access_token", {
+  ): Promise<DeviceTokenResponse> {
+    return this.githubOauth<DeviceTokenResponse>("POST", "/login/oauth/access_token", {
       client_id: clientId,
       device_code: deviceCode,
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",

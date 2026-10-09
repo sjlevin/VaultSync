@@ -1,5 +1,5 @@
 import { App, Modal, Setting, Notice } from "obsidian";
-import { DeviceCodeResponse } from "../types";
+import { DeviceCodeResponse, DeviceTokenResponse } from "../types";
 import { GithubClient } from "../utils/github";
 
 export class DeviceFlowModal extends Modal {
@@ -19,7 +19,7 @@ export class DeviceFlowModal extends Modal {
     private device: DeviceCodeResponse,
     private clientId: string,
     private githubClient: GithubClient,
-    private onSuccess: (token: string) => Promise<void>,
+    private onSuccess: (bundle: DeviceTokenResponse) => Promise<void>,
   ) {
     super(app);
     this.intervalSeconds = Math.max(5, device.interval);
@@ -184,7 +184,7 @@ export class DeviceFlowModal extends Modal {
         if (this.timer) window.clearTimeout(this.timer);
         this.statusEl.setText("Authorized! Setting up...");
         this.countdownEl.setText("");
-        await this.onSuccess(result.access_token);
+        await this.onSuccess(result);
         this.close();
         return;
       }

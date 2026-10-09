@@ -16,6 +16,7 @@ import {
   Settings,
   SyncLogEntry,
   DeviceCodeResponse,
+  DeviceTokenResponse,
   DEFAULT_SETTINGS,
 } from "./src/types";
 import {
@@ -42,7 +43,7 @@ export default class VaultSyncPlugin extends Plugin {
   private queued = false;
   private statusBar?: HTMLElement;
   private syncLog: SyncLogEntry[] = [];
-  private lastStatus = "GitHub Sync: idle";
+  private lastStatus = "VaultSync: idle";
   private lastSyncAt = "";
   private lastError = "";
   private lastChangeCount = 0;
@@ -67,7 +68,7 @@ export default class VaultSyncPlugin extends Plugin {
       this.vaultHelper,
     );
     this.githubClient.onStatusUpdate = (status) => {
-      this.setStatus(`GitHub Sync: ${status}`);
+      this.setStatus(`VaultSync: ${status}`);
     };
 
     const data = await this.loadData();
@@ -91,7 +92,7 @@ export default class VaultSyncPlugin extends Plugin {
     this.syncLog = data?.syncLog ?? [];
 
     this.statusBar = this.addStatusBarItem();
-    this.setStatus("GitHub Sync: idle");
+    this.setStatus("VaultSync: idle");
     this.settingTab = new VaultSyncSettingTab(this.app, this);
     this.addSettingTab(this.settingTab);
     this.registerView(
@@ -100,7 +101,7 @@ export default class VaultSyncPlugin extends Plugin {
     );
     this.addRibbonIcon(
       "refresh-cw",
-      "GitHub Sync",
+      "VaultSync",
       () => void this.activateStatusView(),
     );
 
@@ -220,7 +221,7 @@ export default class VaultSyncPlugin extends Plugin {
       const clientId = this.settings.deviceFlowClientId.trim();
       if (!clientId)
         throw new Error(
-          "Set GitHub OAuth Client ID in settings first, or paste a fine-grained token instead.",
+          "Set your GitHub App client ID in settings first, or paste a fine-grained token into the token field instead.",
         );
       const device = await this.githubClient.githubOauth<DeviceCodeResponse>(
         "POST",
@@ -235,8 +236,13 @@ export default class VaultSyncPlugin extends Plugin {
         device,
         clientId,
         this.githubClient,
-        async (token) => {
-          this.settings.token = token;
+        async (bundle: DeviceTokenResponse) => {
+          if (!bundle.access_token)
+            throw new Error("GitHub sign-in did not return a token.");
+          this.settings.token = bundle.access_token;
+          this.settings.refreshToken = bundle.refresh_token ?? "";
+          this.settings.tokenExpiresAt =
+            Date.now() + (bundle.expires_in ?? 8 * 3600) * 1000;
           this.settings.owner = "";
           await this.githubClient.ensureRepositoryReady();
           await this.saveSettings();
@@ -260,6 +266,17 @@ export default class VaultSyncPlugin extends Plugin {
     this.syncAfterChange();
   }
 
+  /**
+   * Proactively rotate the GitHub App user token when it is expired or
+   * expiring within 5 minutes. No-op for PAT-based setups (no refresh token).
+   */
+  async ensureFreshToken() {
+    const { token, refreshToken, tokenExpiresAt } = this.settings;
+    if (!token || !refreshToken) return;
+    if (tokenExpiresAt && Date.now() < tokenExpiresAt - 5 * 60_000) return;
+    await this.githubClient.refreshAccessToken();
+  }
+
   async sync(reason: string) {
     if (this.syncing) {
       this.queued = true;
@@ -272,6 +289,7 @@ export default class VaultSyncPlugin extends Plugin {
     // are not silently swallowed by the pluginWrites guard, especially on mobile
     // where syncs fire very frequently (startup + interval + file-change).
     this.vaultHelper.clearPluginWrites();
+    await this.ensureFreshToken();
 
     if (reason === "force") {
       this.syncManifest = {};
@@ -281,7 +299,7 @@ export default class VaultSyncPlugin extends Plugin {
     const startedAt = new Date().toISOString();
     let changesForLog: Change[] = [];
     let commitSha: string | undefined;
-    this.setStatus(`GitHub Sync: syncing (${reason})`);
+    this.setStatus(`VaultSync: syncing (${reason})`);
 
     try {
       this.validateSettings();
@@ -294,7 +312,7 @@ export default class VaultSyncPlugin extends Plugin {
       
       changesForLog = changes;
       if (changes.length === 0) {
-        this.setStatus("GitHub Sync: synced");
+        this.setStatus("VaultSync: synced");
         this.lastSyncAt = new Date().toLocaleString();
         this.lastChangeCount = 0;
         this.lastError = "";
@@ -334,7 +352,7 @@ export default class VaultSyncPlugin extends Plugin {
       this.lastChangeCount = changes.length;
       this.lastError = "";
       this.setStatus(
-        `GitHub Sync: synced ${resolvedChanges.length} change${resolvedChanges.length === 1 ? "" : "s"}`,
+        `VaultSync: synced ${resolvedChanges.length} change${resolvedChanges.length === 1 ? "" : "s"}`,
       );
       this.recordSyncLog(
         startedAt,
@@ -368,10 +386,11 @@ export default class VaultSyncPlugin extends Plugin {
     this.queued = false;
     this.lastSyncTime = Date.now();
     this.vaultHelper.clearPluginWrites();
+    await this.ensureFreshToken();
 
     const startedAt = new Date().toISOString();
     let changesForLog: Change[] = [];
-    this.setStatus("GitHub Sync: pulling changes...");
+    this.setStatus("VaultSync: pulling changes...");
 
     try {
       this.validateSettings();
@@ -396,7 +415,7 @@ export default class VaultSyncPlugin extends Plugin {
       changesForLog = pullChanges;
       if (pullChanges.length === 0) {
         new Notice("Already up to date — nothing to pull.");
-        this.setStatus("GitHub Sync: synced");
+        this.setStatus("VaultSync: synced");
         this.recordSyncLog(startedAt, "pull", "success", pullChanges);
         return;
       }
@@ -410,7 +429,7 @@ export default class VaultSyncPlugin extends Plugin {
       this.lastChangeCount = pullChanges.length;
       this.lastError = "";
       this.setStatus(
-        `GitHub Sync: pulled ${pullChanges.length} change${pullChanges.length === 1 ? "" : "s"}`,
+        `VaultSync: pulled ${pullChanges.length} change${pullChanges.length === 1 ? "" : "s"}`,
       );
       new Notice(`Pulled ${pullChanges.length} change${pullChanges.length === 1 ? "" : "s"} from GitHub.`);
       this.recordSyncLog(startedAt, "pull", "success", pullChanges);
