@@ -1,4 +1,3 @@
-import { normalizePath } from "obsidian";
 import { ConflictKind } from "../sync-core";
 
 export async function gitBlobSha(bytes: ArrayBuffer): Promise<string> {
@@ -29,29 +28,6 @@ export function bytesFromBase64(base64: string): Uint8Array {
 
 export function encodePath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
-}
-
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-export function matchesPattern(path: string, pattern: string): boolean {
-  pattern = normalizePath(pattern);
-  if (pattern.endsWith("/**"))
-    return (
-      path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))
-    );
-  if (!pattern.includes("*")) return path === pattern;
-  const escaped = pattern
-    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(path);
-}
-
-export function addStatusRow(container: HTMLElement, label: string, value: string) {
-  const row = container.createDiv({ cls: "private-github-sync-row" });
-  row.createSpan({ cls: "private-github-sync-label", text: label });
-  row.createSpan({ cls: "private-github-sync-value", text: value });
 }
 
 export function conflictDescription(kind: ConflictKind): string {
@@ -158,10 +134,7 @@ export function isBinaryFile(path: string): boolean {
   ]);
   const parts = path.split("/");
   const filename = parts[parts.length - 1];
-  if (!filename.includes(".")) {
-    // Files without extension like README, LICENSE, etc. are text
-    return false;
-  }
+  if (!filename.includes(".")) return false;
   const ext = filename.split(".").pop()?.toLowerCase();
   return ext ? BINARY_EXTENSIONS.has(ext) : false;
 }

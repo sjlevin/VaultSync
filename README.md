@@ -43,19 +43,26 @@ If you'd rather not depend on the author's App, create your own (a few minutes, 
 ## Sync behavior
 
 - **Automatic**: on startup, after file changes (3s debounce), and on a timer (default 5 minutes). All configurable. Auto-sync pauses while GitHub rate-limits you. Background syncs never open dialogs: if one hits a conflict or a mass-delete check, it stops with a notice and waits for you to run **Sync now**.
-- **Conflicts**: if a file changed on both sides, you choose per file — keep local, keep remote, or keep both (remote saved as `name.conflict-<timestamp>.ext`, which is uploaded on the next sync). Cancelling the dialog cancels the sync; it never silently picks for you.
+- **Conflicts**: if a file changed on both sides, you choose per file — keep local, keep remote, or keep both (remote saved as `name.conflict-<timestamp>.ext`, which is uploaded on the next sync). Cancelling the dialog cancels the sync; it never silently picks for you. A file you edit while a sync is running is left alone and the sync stops with a notice to run **Sync now**.
 - **Deletes** propagate both ways, with local backups. **File history**: browse a note's past versions from its commits and restore from the plugin (the live file is backed up first).
 - **Backups**: overwritten and deleted files are copied under `.github-sync-backup/<timestamp>/` (local only, never uploaded, pruned after 30 days).
-- **Ignore rules**: glob-ish patterns, one per line. Defaults ignore `.git/`, `.trash/`, `.github-sync-backup/`, the root `README.md`, workspace state, and `.DS_Store`.
+- **Ignore rules**: glob-ish patterns, one per line, matched case- and Unicode-form-insensitively. Defaults ignore `.git/`, `.trash/`, `.github-sync-backup/`, the root `README.md`, workspace state, and `.DS_Store`; the first three are also enforced in code and cannot be re-enabled.
+- **Skipped files**: a remote entry whose name is unsafe, collides with another entry (differs only by case or Unicode form), is over GitHub's 100 MB limit, or is not a regular file is left untouched on both sides and reported in the console, as are local files whose names collide with each other.
 
 ## Security model
 
 - The plugin's own folder (`.obsidian/plugins/vaultsync/`, including its token file) is **never synced**, enforced in code — not via the editable ignore list — and matched case-insensitively so `.Obsidian/…` aliases can't slip past on macOS or Windows.
-- No JavaScript (`.js`, `.mjs`, `.cjs`) under the Obsidian config dir is ever downloaded or uploaded, so a hostile commit can't replace executable plugin code.
-- Obsidian settings sync is an allowlist (`app.json`, `appearance.json`, `core-plugins.json`, `hotkeys.json`); community plugin folders sync only if you opt in, excluding their `data.json` files unless you separately opt those in too.
+- No JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`, as a file or a folder name) under the Obsidian config dir is ever downloaded or uploaded, so a hostile commit can't replace executable plugin code.
+- Obsidian settings sync is an allowlist (`app.json`, `appearance.json`, `core-plugins.json`, `hotkeys.json`). Community plugin sync, if you opt in, carries only each plugin's `data.json`, and only while "Sync plugin data.json" is also on (it is off by default, since `data.json` often holds API keys): `manifest.json`, `styles.css` and everything else in a plugin folder stay local, since a synced `manifest.json` could repoint a plugin's entry file.
 - Remote file paths are validated (`..`, absolute paths, control characters, Windows-reserved names, etc. are rejected), local files with such names are skipped rather than uploaded, and every local write is containment-checked against the vault root.
-- Downloads — sync and version restore alike — verify the blob hash before writing.
+- Downloads — sync and version restore alike — verify the blob hash before writing, every object id taken from an API response is checked before it is used in a URL, and large-file redirects are only followed to GitHub's own hosts.
 - Changing the repository/branch/path resets the sync baseline, and a sync that would delete more than 25% (or 10 or more) of the files on either side asks for confirmation first.
+
+## Security notes
+
+- Tokens are stored in plaintext in this plugin's `data.json` under `.obsidian/plugins/vaultsync/`. That file is excluded from this plugin's sync, but anything else that copies the vault (Obsidian Sync, iCloud/Dropbox/OneDrive, backups) will copy it too. Use "Forget on this device" before handing a vault copy to anyone, and revoke the app's authorization on GitHub if a copy may have leaked.
+- Local writes are containment-checked against the vault root by path only. A symlinked folder inside the vault is followed by the filesystem and is not protected by that check.
+- Backups under `.github-sync-backup/` are pruned on the next successful sync once they are older than 30 days.
 
 ## Development
 

@@ -27,6 +27,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
             .setButtonText("Forget on this device")
             .setWarning()
             .onClick(async () => {
+              this.plugin.githubClient.authGeneration++;
               this.plugin.settings.token = "";
               this.plugin.settings.refreshToken = "";
               this.plugin.settings.tokenExpiresAt = 0;
@@ -121,12 +122,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
     );
     this.toggle(
       "Sync community plugins",
-      "Sync plugin folders across devices, except JavaScript files (never synced) and this plugin's own folder.",
+      "Syncs only each plugin's data.json (its settings), and only while \"Sync plugin data.json\" below is also on. JavaScript, manifest.json, styles.css and this plugin's own folder are never synced.",
       "syncCommunityPlugins",
     );
     this.toggle(
-      "Sync plugins' data.json files",
-      "data.json often holds API keys. Off by default; enable only if you want plugin settings synced too.",
+      "Sync plugin data.json",
+      "data.json often holds API keys. Off by default; with it off, community plugin sync carries nothing.",
       "syncPluginDataJson",
     );
     this.text("Commit author name", "Name recorded as the author of sync commits.", "authorName");

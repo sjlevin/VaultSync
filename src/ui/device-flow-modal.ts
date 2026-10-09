@@ -129,6 +129,11 @@ export class DeviceFlowModal extends Modal {
     this.checkNowBtnEl.onClickEvent(() => {
       void this.triggerImmediateCheck();
     });
+    // GitHub's minimum polling interval applies to the first poll too.
+    this.checkNowBtnEl.disabled = true;
+    window.setTimeout(() => {
+      if (!this.isClosed) this.checkNowBtnEl.disabled = false;
+    }, this.intervalSeconds * 1000);
 
     // Start polling loop
     this.startPollingLoop();
@@ -182,6 +187,9 @@ export class DeviceFlowModal extends Modal {
 
     try {
       const result = await this.githubClient.checkDeviceToken(this.clientId, this.device.device_code);
+      // The user may have dismissed the modal while the request was in
+      // flight; a token that arrives afterwards must not be stored.
+      if (this.isClosed) return;
 
       if (result.access_token) {
         this.isClosed = true;

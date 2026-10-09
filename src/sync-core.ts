@@ -43,6 +43,8 @@ export function planChanges(
     const baseRemote = base?.remoteSha ?? null;
     const localSha = localEntry?.sha ?? null;
     const remoteSha = remoteEntry?.sha ?? null;
+    // Gone on both sides (base entry or tombstone left over): nothing to do.
+    if (!localSha && !remoteSha) continue;
     const localChanged = localSha !== baseLocal;
     const remoteChanged = remoteSha !== baseRemote;
 
@@ -94,10 +96,42 @@ export function planPullChanges(
       continue;
     }
 
-    if (localSha && baseSha && localSha === baseSha)
-      changes.push({ type: "deleteLocal", path });
+    if (!localSha || !baseSha) continue;
+    if (localSha === baseSha) changes.push({ type: "deleteLocal", path });
+    else
+      changes.push({
+        type: "conflict",
+        path,
+        remoteSha: null,
+        kind: "local_modified_remote_deleted",
+      });
   }
   return changes;
+}
+
+/**
+ * The remote side of a plan as one git tree update. Deduped per (type, path)
+ * so a "keep both" resolution (downloadConflictCopy then upload of the same
+ * path) still uploads; an upload wins over a delete of the same path because
+ * one tree cannot carry both.
+ */
+export function planCommitTree(
+  changes: Change[],
+  remotePathOf: (path: string) => string,
+): {
+  uploads: Array<{ path: string; remotePath: string }>;
+  deletes: Array<{ path: string; remotePath: string }>;
+} {
+  const uploads = new Map<string, string>();
+  const deletes = new Map<string, string>();
+  for (const change of changes) {
+    if (change.type === "upload") uploads.set(change.path, remotePathOf(change.path));
+    else if (change.type === "deleteRemote") deletes.set(change.path, remotePathOf(change.path));
+  }
+  for (const path of uploads.keys()) deletes.delete(path);
+  const entries = (m: Map<string, string>) =>
+    [...m].map(([path, remotePath]) => ({ path, remotePath }));
+  return { uploads: entries(uploads), deletes: entries(deletes) };
 }
 
 /** Share of files above which a mass-delete plan needs confirmation. */
@@ -137,26 +171,39 @@ export function parseBackupStamp(folderName: string): number | null {
 /**
  * Merge the post-sync local and remote states into the next manifest.
  *
- * `pendingDownloads` holds paths this sync planned to download but that are
- * absent from `local` (download not yet applied, or the mobile file index
- * lagging). Those must NOT be tombstoned: a tombstone
- * ({sha:"", remoteSha}) makes the next planChanges emit `deleteRemote` for
- * them — deleting from GitHub what the other side just added.
+ * A path on both sides is recorded with the remote SHA as the base for both,
+ * so a local edit made during the sync shows up as an upload next time. A
+ * path only on the remote is tombstoned ({sha:"", remoteSha}) so the next
+ * plan emits deleteRemote instead of re-downloading it, except for
+ * `pendingDownloads`: paths this sync planned to download but that are absent
+ * from `local` (download not yet applied, or the mobile file index lagging).
+ * Tombstoning those would delete from GitHub what the other side just added.
+ * A path only present locally is left out until it has been uploaded.
+ *
+ * `preserve` marks paths this run refused to touch (poisoned, see
+ * VaultHelper.skippedPaths): their `base` entry is carried over unchanged,
+ * because `local` and `remote` deliberately omit them and dropping the entry
+ * would lose the baseline. Once the poison clears, a file deleted on one side
+ * then still plans as a delete or conflict rather than a re-upload. Paths the
+ * user ignores are dropped as before.
  */
 export function nextManifest(
   local: Manifest,
   remote: RemoteTree,
   isIgnored: (path: string) => boolean = () => false,
   pendingDownloads: Set<string> = new Set(),
+  base: Manifest = {},
+  preserve: (path: string) => boolean = () => false,
 ): Manifest {
   const next: Manifest = {};
-  for (const path of new Set([...Object.keys(local), ...Object.keys(remote)])) {
+  const paths = new Set([...Object.keys(local), ...Object.keys(remote), ...Object.keys(base)]);
+  for (const path of paths) {
     if (isIgnored(path)) continue;
+    if (preserve(path)) {
+      if (base[path]) next[path] = base[path];
+      continue;
+    }
     if (local[path] && remote[path]) {
-      // Use the remote SHA (the version actually synced) as the base for both
-      // local and remote in the manifest. If the local file was modified
-      // concurrently during sync, its current localSha will differ from the
-      // remoteSha, correctly prompting an upload in the next sync.
       const remoteSha = remote[path].sha;
       next[path] = {
         sha: remoteSha,
@@ -165,17 +212,35 @@ export function nextManifest(
       };
     } else if (!local[path] && remote[path]) {
       if (pendingDownloads.has(path)) continue;
-      // File exists on remote but was deleted locally. Record a tombstone so
-      // the next sync knows the deletion was intentional and plans
-      // deleteRemote instead of re-downloading the file.
       next[path] = {
         sha: "",
         remoteSha: remote[path].sha,
         size: remote[path].size,
       };
     }
-    // If local[path] exists but remote[path] doesn't, the file is
-    // local-only (upload pending) — don't add to the manifest yet.
   }
   return next;
+}
+
+/**
+ * Groups of distinct spellings that share one canonical key (case or Unicode
+ * form), across whatever paths are given; a key with a single spelling is not
+ * a collision even if it appears several times. Groups and their members are
+ * sorted so the result is stable for messages and tests.
+ */
+export function findCanonicalCollisions(
+  paths: Iterable<string>,
+  keyFn: (path: string) => string,
+): string[][] {
+  const byKey = new Map<string, Set<string>>();
+  for (const path of paths) {
+    const key = keyFn(path);
+    const group = byKey.get(key) ?? new Set<string>();
+    group.add(path);
+    byKey.set(key, group);
+  }
+  return [...byKey.entries()]
+    .filter(([, group]) => group.size > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, group]) => [...group].sort());
 }

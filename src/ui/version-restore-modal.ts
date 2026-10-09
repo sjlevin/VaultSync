@@ -3,7 +3,16 @@ import { VersionEntry } from "../types";
 import { generateDiff, truncateForPreview } from "../utils/helpers";
 import type VaultSyncPlugin from "../../main";
 
+/** GitHub's commit date, or the raw string when it does not parse. */
+function formatVersionDate(date: string): string {
+  const parsed = new Date(date);
+  return Number.isNaN(parsed.getTime()) ? date : parsed.toLocaleString();
+}
+
 export class RestoreConfirmModal extends Modal {
+  /** Called once the dialog is gone, however it was dismissed. */
+  onDone?: () => void;
+
   constructor(
     app: App,
     private plugin: VaultSyncPlugin,
@@ -40,7 +49,7 @@ export class RestoreConfirmModal extends Modal {
       row.createEl("strong", { text: label + ": " });
       row.createSpan({ text: val });
     };
-    addCommitRow(commitBox, "Date", new Date(this.version.date).toLocaleString());
+    addCommitRow(commitBox, "Date", formatVersionDate(this.version.date));
     addCommitRow(commitBox, "Commit Message", this.version.message);
     addCommitRow(commitBox, "Commit SHA", this.version.sha.slice(0, 8));
 
@@ -91,6 +100,10 @@ export class RestoreConfirmModal extends Modal {
     } catch (e) {
       diffContainer.setText(`Failed to load diff: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  onClose() {
+    this.onDone?.();
   }
 
   private async renderDiff(container: HTMLDivElement) {
@@ -145,6 +158,10 @@ export class RestoreConfirmModal extends Modal {
 }
 
 export class VersionRestoreModal extends FuzzySuggestModal<VersionEntry> {
+  /** Called when the picker is dismissed, or when the confirm dialog it opened is gone. */
+  onDone?: () => void;
+  private chosen = false;
+
   constructor(
     app: App,
     private plugin: VaultSyncPlugin,
@@ -165,8 +182,19 @@ export class VersionRestoreModal extends FuzzySuggestModal<VersionEntry> {
   }
 
   onChooseItem(version: VersionEntry): void {
-    new RestoreConfirmModal(this.app, this.plugin, this.file, version, async () => {
+    this.chosen = true;
+    const confirm = new RestoreConfirmModal(this.app, this.plugin, this.file, version, async () => {
       await this.restore(version);
-    }).open();
+    });
+    confirm.onDone = this.onDone;
+    confirm.open();
+  }
+
+  onClose() {
+    // Obsidian closes the picker and reports the choice in the same tick, in
+    // either order; defer so a choice made just after close still counts.
+    window.setTimeout(() => {
+      if (!this.chosen) this.onDone?.();
+    }, 0);
   }
 }

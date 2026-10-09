@@ -1,10 +1,9 @@
 import { requestUrl, App, Notice, TFile } from "obsidian";
 import { Settings, DeviceTokenResponse, VersionEntry } from "../types";
-import { RemoteTree, Change, Manifest } from "../sync-core";
+import { RemoteTree, Change, Manifest, planCommitTree } from "../sync-core";
 import { VaultHelper } from "./vault";
-import { isSafePath, canonicalPathKey } from "../remote-paths";
+import { canonicalPathKey, isGitSha } from "../remote-paths";
 import {
-  sleep,
   encodePath,
   base64FromBytes,
   bytesFromBase64,
@@ -14,6 +13,13 @@ import {
 import { GITHUB_BLOB_LIMIT } from "../constants";
 
 export class RemoteAdvancedError extends Error {}
+
+/** One listing of the branch: the commit it was taken from and its blobs. */
+export interface RemoteSnapshot {
+  headSha: string;
+  treeSha: string;
+  tree: RemoteTree;
+}
 
 /** GitHub API failure with the HTTP status attached for retry decisions. */
 export class GithubApiError extends Error {
@@ -26,6 +32,40 @@ export class GithubApiError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * Every SHA taken from an API response is interpolated into a URL path;
+ * anything that is not a bare object id must fail here, not reach the URL.
+ */
+function assertGitSha(sha: unknown, what: string): string {
+  if (!isGitSha(sha)) throw new Error(`GitHub returned an invalid ${what}: ${String(sha)}`);
+  return sha;
+}
+
+/** Hosts GitHub hands out in `download_url`; the token is never sent to them. */
+const DOWNLOAD_ORIGINS = new Set([
+  "https://objects.githubusercontent.com",
+  "https://raw.githubusercontent.com",
+  "https://api.github.com",
+  "https://github.com",
+]);
+
+function assertDownloadUrl(url: string, path: string): string {
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    throw new Error(`Refusing malformed download URL for ${path}`);
+  }
+  if (!DOWNLOAD_ORIGINS.has(origin))
+    throw new Error(`Refusing download URL for ${path} on unexpected host ${origin}`);
+  return url;
+}
+
+function bufferFromBase64(content: string): ArrayBuffer {
+  const bytes = bytesFromBase64(content.replace(/\s/g, ""));
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function header(headers: Record<string, string> | undefined, name: string): string | undefined {
@@ -48,6 +88,11 @@ function retryAfterMs(headers: Record<string, string> | undefined): number | und
 
 export class GithubClient {
   public onStatusUpdate?: (status: string) => void;
+  /**
+   * Bumped by "Forget on this device". A token refresh that was in flight
+   * when the user signed out must not write the rotated tokens back.
+   */
+  public authGeneration = 0;
 
   constructor(
     private app: App,
@@ -208,8 +253,10 @@ export class GithubClient {
     const settings = this.getSettings();
     if (!settings.refreshToken || !settings.deviceFlowClientId.trim())
       return false;
+    const generation = this.authGeneration;
+    let result: DeviceTokenResponse;
     try {
-      const result = await this.githubOauth<DeviceTokenResponse>(
+      result = await this.githubOauth<DeviceTokenResponse>(
         "POST",
         "/login/oauth/access_token",
         {
@@ -218,16 +265,25 @@ export class GithubClient {
           refresh_token: settings.refreshToken,
         },
       );
-      if (!result.access_token || !result.refresh_token) return false;
-      settings.token = result.access_token;
-      settings.refreshToken = result.refresh_token;
-      settings.tokenExpiresAt =
-        Date.now() + (result.expires_in ?? 8 * 3600) * 1000;
-      await this.saveSettings();
-      return true;
     } catch {
       return false;
     }
+    if (!result.access_token || !result.refresh_token) return false;
+    if (generation !== this.authGeneration) return false;
+    settings.token = result.access_token;
+    settings.refreshToken = result.refresh_token;
+    settings.tokenExpiresAt =
+      Date.now() + (result.expires_in ?? 8 * 3600) * 1000;
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      // The old refresh token is already revoked by GitHub; the user has to
+      // know the rotated one did not reach disk.
+      throw new Error(
+        `GitHub token was refreshed but could not be saved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return true;
   }
 
   async ensureRepositoryReady() {
@@ -267,6 +323,10 @@ export class GithubClient {
       true,
     );
     if (!branch.ok) {
+      if (branch.status !== 404)
+        throw new Error(
+          `GitHub branch lookup failed (${branch.status}): ${branch.message}`,
+        );
       if (settings.branch !== "main")
         throw new Error(
           `Branch ${settings.branch} does not exist. Create it on GitHub or use main.`,
@@ -301,113 +361,99 @@ export class GithubClient {
     );
   }
 
-  async remoteTree(): Promise<{
-    headSha: string;
-    treeSha: string;
-    tree: RemoteTree;
-  }> {
-    this.onStatusUpdate?.("fetching remote tree...");
+  private async branchHead(): Promise<string> {
     const settings = this.getSettings();
     const ref = await this.github<{ object: { sha: string } }>(
       "GET",
       `/git/ref/heads/${encodeURIComponent(settings.branch)}?t=${Date.now()}`,
     );
+    return assertGitSha(ref.object?.sha, "ref SHA");
+  }
+
+  /**
+   * The branch's blobs keyed by local path. Entries this vault must not
+   * touch are not merely dropped but poisoned (`vaultHelper.skippedPaths`),
+   * so the plan sees neither side of them (see that field). Spellings that
+   * collide with the local side are poisoned by the caller once both listings
+   * are in hand.
+   */
+  async remoteTree(): Promise<RemoteSnapshot> {
+    this.onStatusUpdate?.("fetching remote tree...");
+    const headSha = await this.branchHead();
     const commit = await this.github<{ tree: { sha: string } }>(
       "GET",
-      `/git/commits/${ref.object.sha}`,
+      `/git/commits/${headSha}`,
     );
+    const treeSha = assertGitSha(commit.tree?.sha, "tree SHA");
     const treeResponse = await this.github<{
-      tree: Array<{ path: string; type: string; sha: string; size?: number }>;
+      tree: Array<{ path: string; mode: string; type: string; sha: string; size?: number }>;
       truncated?: boolean;
-    }>("GET", `/git/trees/${commit.tree.sha}?recursive=1`);
+    }>("GET", `/git/trees/${treeSha}?recursive=1`);
     if (treeResponse.truncated)
       throw new Error(
         "GitHub truncated the repository tree. Split the vault with Root path or reduce repository size before syncing.",
       );
     const tree: RemoteTree = {};
-    const rawPaths = treeResponse.tree.filter(i => i.type === "blob").map(i => i.path);
-    const remotePrefix = this.vaultHelper.detectRemotePrefix(rawPaths);
-    // Collision map: two remote entries must never silently resolve to the
-    // same local file (case-only or NFC/NFD-only duplicates).
+    const blobs = treeResponse.tree.filter((i) => i.type === "blob");
+    const remotePrefix = this.vaultHelper.detectRemotePrefix(blobs.map((i) => i.path));
     const seenLocal = new Map<string, string>();
     const skipped: string[] = [];
-    for (const item of treeResponse.tree) {
-      if (item.type !== "blob") continue;
-      if (!isSafePath(item.path)) {
-        skipped.push(`unsafe path: ${item.path}`);
-        continue;
-      }
+    const skip = (localPath: string, reason: string) => {
+      this.vaultHelper.poison(localPath);
+      skipped.push(reason);
+    };
+    for (const item of blobs) {
+      const inScope = this.vaultHelper.localPathUnchecked(item.path, remotePrefix);
+      if (inScope === null) continue;
       const path = this.vaultHelper.localPath(item.path, remotePrefix);
-      if (!path || this.vaultHelper.isIgnored(path)) continue;
-      const collisionKey = canonicalPathKey(path);
-      const firstSeen = seenLocal.get(collisionKey);
-      if (firstSeen !== undefined && firstSeen !== item.path) {
-        skipped.push(`path collision: ${item.path} collides with ${firstSeen}`);
+      if (path === null) {
+        skip(inScope, `unsafe path: ${item.path}`);
         continue;
       }
-      seenLocal.set(collisionKey, item.path);
-      if (item.size && item.size > GITHUB_BLOB_LIMIT)
-        throw new Error(
-          `${path} is ${formatBytes(item.size)}, above GitHub's 100 MB file limit. Move it to Git LFS/external storage or ignore it.`,
-        );
-      tree[path] = { sha: item.sha, size: item.size };
+      if (!path || this.vaultHelper.isIgnored(path)) continue;
+      const key = canonicalPathKey(path);
+      const firstSeen = seenLocal.get(key);
+      if (firstSeen !== undefined) {
+        delete tree[firstSeen];
+        skip(path, `path collision: ${item.path} collides with ${firstSeen}`);
+        continue;
+      }
+      seenLocal.set(key, path);
+      if (item.mode !== "100644" && item.mode !== "100755") {
+        skip(path, `not a regular file (mode ${item.mode}): ${item.path}`);
+        continue;
+      }
+      if (item.size && item.size > GITHUB_BLOB_LIMIT) {
+        skip(path, `${item.path} is ${formatBytes(item.size)}, above GitHub's 100 MB file limit`);
+        continue;
+      }
+      tree[path] = { sha: assertGitSha(item.sha, "blob SHA"), size: item.size };
     }
     if (skipped.length) {
       console.warn(`VaultSync skipped remote entries:\n${skipped.join("\n")}`);
       new Notice(
-        `VaultSync skipped ${skipped.length} remote file(s) (unsafe or colliding paths); they were left untouched. See the console for details.`,
+        `VaultSync skipped ${skipped.length} remote file(s) (unsafe, colliding, oversized or non-regular); they were left untouched on both sides. See the console for details.`,
         10000,
       );
     }
-    return { headSha: ref.object.sha, treeSha: commit.tree.sha, tree };
+    return { headSha, treeSha, tree };
   }
 
   /**
-   * Download a file's bytes. When `expectedSha` (the blob SHA from the tree)
-   * is given, fetch the immutable blob directly and verify the SHA before
-   * returning — the branch can advance between planning and download, but a
-   * blob SHA cannot change under us.
+   * Download a file's bytes by blob SHA (taken from the tree at planning
+   * time) and verify them: the branch can advance between planning and
+   * download, but a blob SHA cannot change under us.
    */
-  async downloadBytes(path: string, expectedSha?: string): Promise<ArrayBuffer> {
+  async downloadBytes(path: string, expectedSha: string): Promise<ArrayBuffer> {
     await this.vaultHelper.assertRemoteDownloadable(path);
-    if (expectedSha) {
-      const data = await this.github<{ content: string; encoding: string }>(
-        "GET",
-        `/git/blobs/${expectedSha}`,
-      );
-      if (data.encoding !== "base64")
-        throw new Error(`Unsupported GitHub blob encoding for ${path}`);
-      const bytes = bytesFromBase64(data.content.replace(/\s/g, ""));
-      const buffer = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-      ) as ArrayBuffer;
-      const actualSha = await gitBlobSha(buffer);
-      if (actualSha !== expectedSha)
-        throw new Error(
-          `SHA mismatch downloading ${path}: expected ${expectedSha}, got ${actualSha}`,
-        );
-      return buffer;
-    }
-    const settings = this.getSettings();
-    const data = await this.github<{ content: string; encoding: string; download_url?: string }>(
+    assertGitSha(expectedSha, "blob SHA");
+    const data = await this.github<{ content: string; encoding: string }>(
       "GET",
-      `/contents/${encodePath(this.vaultHelper.remotePath(path))}?ref=${encodeURIComponent(settings.branch)}`,
+      `/git/blobs/${expectedSha}`,
     );
-    // GitHub returns encoding="none" with a download_url for files >1 MB.
-    if (data.encoding === "none" && data.download_url) {
-      const response = await requestUrl({ url: data.download_url, method: "GET", throw: false });
-      if (response.status < 200 || response.status >= 300)
-        throw new Error(`Failed to download ${path} (${response.status})`);
-      return response.arrayBuffer;
-    }
     if (data.encoding !== "base64")
-      throw new Error(`Unsupported GitHub content encoding for ${path}`);
-    const bytes = bytesFromBase64(data.content.replace(/\s/g, ""));
-    return bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength,
-    ) as ArrayBuffer;
+      throw new Error(`Unsupported GitHub blob encoding for ${path}`);
+    return this.verified(path, bufferFromBase64(data.content), expectedSha);
   }
 
   /**
@@ -419,6 +465,7 @@ export class GithubClient {
     path: string,
     commitSha: string,
   ): Promise<ArrayBuffer> {
+    assertGitSha(commitSha, "commit SHA");
     const data = await this.github<{
       sha: string;
       content: string;
@@ -429,27 +476,32 @@ export class GithubClient {
       "GET",
       `/contents/${encodePath(this.vaultHelper.remotePath(path))}?ref=${encodeURIComponent(commitSha)}`,
     );
+    const expectedSha = assertGitSha(data.sha, "blob SHA");
     if (data.size) this.vaultHelper.assertSyncableSize(path, data.size);
     let buffer: ArrayBuffer;
     // GitHub returns encoding="none" with a download_url for files >1 MB.
     if (data.encoding === "none" && data.download_url) {
-      const response = await requestUrl({ url: data.download_url, method: "GET", throw: false });
+      const response = await requestUrl({
+        url: assertDownloadUrl(data.download_url, path),
+        method: "GET",
+        throw: false,
+      });
       if (response.status < 200 || response.status >= 300)
         throw new Error(`Failed to download ${path} (${response.status})`);
       buffer = response.arrayBuffer;
     } else {
       if (data.encoding !== "base64")
         throw new Error(`Unsupported GitHub content encoding for ${path}`);
-      const bytes = bytesFromBase64(data.content.replace(/\s/g, ""));
-      buffer = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-      ) as ArrayBuffer;
+      buffer = bufferFromBase64(data.content);
     }
+    return this.verified(path, buffer, expectedSha);
+  }
+
+  private async verified(path: string, buffer: ArrayBuffer, expectedSha: string): Promise<ArrayBuffer> {
     const actualSha = await gitBlobSha(buffer);
-    if (actualSha !== data.sha)
+    if (actualSha !== expectedSha)
       throw new Error(
-        `SHA mismatch downloading ${path}: expected ${data.sha}, got ${actualSha}`,
+        `SHA mismatch downloading ${path}: expected ${expectedSha}, got ${actualSha}`,
       );
     return buffer;
   }
@@ -466,23 +518,26 @@ export class GithubClient {
       `/commits?sha=${encodeURIComponent(settings.branch)}&path=${encodePath(this.vaultHelper.remotePath(path))}&per_page=50`,
     );
     return commits.map((commit) => ({
-      sha: commit.sha,
-      message: commit.commit.message.split("\n")[0],
-      date: commit.commit.author?.date ?? "",
+      sha: assertGitSha(commit.sha, "commit SHA"),
+      message: (commit.commit?.message ?? "").split("\n")[0].slice(0, 200),
+      date: commit.commit?.author?.date ?? "",
     }));
   }
 
   /**
-   * Commit, and on a concurrent-push race replan against the fresh tree and
-   * commit once more. `retryChanges` is the replanned set actually applied
-   * (empty when the first commit went through) so the caller can treat its
-   * downloads as pending in the manifest exactly like first-plan ones.
+   * Commit, and on a concurrent-push race replan against a fresh snapshot of
+   * both sides and commit once more. `snapshotCallback` is the same routine
+   * the first plan used (it re-lists both sides and recomputes the poison
+   * set, so the first tree's poison does not leak into the replan).
+   * `retryChanges` is the replanned set actually applied (empty when the
+   * first commit went through) so the caller can treat its downloads as
+   * pending in the manifest exactly like first-plan ones.
    */
   async commitRemoteChangesWithRetry(
     changes: Change[],
-    remoteInfo: { headSha: string; treeSha: string; tree: RemoteTree },
+    remoteInfo: RemoteSnapshot,
     remote: RemoteTree,
-    localManifestCallback: () => Promise<Manifest>,
+    snapshotCallback: () => Promise<{ local: Manifest; remoteInfo: RemoteSnapshot }>,
     planChangesCallback: (local: Manifest, tree: RemoteTree) => Change[],
     resolveConflictsCallback: (changes: Change[], local: Manifest) => Promise<Change[]>,
     applyLocalChangesCallback: (changes: Change[], local: Manifest) => Promise<unknown>,
@@ -491,8 +546,7 @@ export class GithubClient {
       return { ...(await this.commitRemoteChanges(changes, remoteInfo, remote)), retryChanges: [] };
     } catch (error) {
       if (!(error instanceof RemoteAdvancedError)) throw error;
-      const fresh = await this.remoteTree();
-      const local = await localManifestCallback();
+      const { local, remoteInfo: fresh } = await snapshotCallback();
       const retryChanges = await resolveConflictsCallback(
         planChangesCallback(local, fresh.tree),
         local,
@@ -510,7 +564,7 @@ export class GithubClient {
 
   async commitRemoteChanges(
     changes: Change[],
-    remoteInfo: { headSha: string; treeSha: string; tree: RemoteTree },
+    remoteInfo: RemoteSnapshot,
     remote: RemoteTree,
   ): Promise<{ remote: RemoteTree; commitSha?: string }> {
     const settings = this.getSettings();
@@ -520,55 +574,44 @@ export class GithubClient {
       type: string;
       sha: string | null;
     }> = [];
-    const touched = new Set<string>();
-    
-    const totalUploads = changes.filter(c => c.type === "upload").length;
-    let currentUpload = 0;
+    const { uploads, deletes } = planCommitTree(changes, (p) => this.vaultHelper.remotePath(p));
 
-    for (const change of changes) {
-      if (touched.has(change.path)) continue;
-      touched.add(change.path);
-      if (change.type === "upload") {
-        currentUpload++;
-        this.onStatusUpdate?.(`uploading files (${currentUpload}/${totalUploads})...`);
-        let bytes: ArrayBuffer;
-        const file = this.app.vault.getAbstractFileByPath(change.path);
-        if (file instanceof TFile) {
-          bytes = await this.app.vault.readBinary(file);
-        } else {
-          // Config-dir / hidden files aren't TFiles; read via the adapter.
-          try {
-            bytes = await this.app.vault.adapter.readBinary(change.path);
-          } catch {
-            console.warn(`VaultSync: skipping upload, file vanished: ${change.path}`);
-            continue;
-          }
+    let currentUpload = 0;
+    for (const { path, remotePath } of uploads) {
+      currentUpload++;
+      this.onStatusUpdate?.(`uploading files (${currentUpload}/${uploads.length})...`);
+      let bytes: ArrayBuffer;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) {
+        bytes = await this.app.vault.readBinary(file);
+      } else {
+        // Config-dir / hidden files aren't TFiles; read via the adapter.
+        try {
+          bytes = await this.app.vault.adapter.readBinary(path);
+        } catch {
+          console.warn(`VaultSync: skipping upload, file vanished: ${path}`);
+          continue;
         }
-        this.vaultHelper.assertSyncableSize(change.path, bytes.byteLength);
-        const blob = await this.github<{ sha: string }>("POST", "/git/blobs", {
-          content: base64FromBytes(bytes),
-          encoding: "base64",
-        });
-        tree.push({
-          path: this.vaultHelper.remotePath(change.path),
-          mode: "100644",
-          type: "blob",
-          sha: blob.sha,
-        });
-        remote[change.path] = {
-          sha: await gitBlobSha(bytes),
-          size: bytes.byteLength,
-        };
       }
-      if (change.type === "deleteRemote") {
-        tree.push({
-          path: this.vaultHelper.remotePath(change.path),
-          mode: "100644",
-          type: "blob",
-          sha: null,
-        });
-        delete remote[change.path];
-      }
+      this.vaultHelper.assertSyncableSize(path, bytes.byteLength);
+      const blob = await this.github<{ sha: string }>("POST", "/git/blobs", {
+        content: base64FromBytes(bytes),
+        encoding: "base64",
+      });
+      tree.push({
+        path: remotePath,
+        mode: "100644",
+        type: "blob",
+        sha: assertGitSha(blob.sha, "blob SHA"),
+      });
+      remote[path] = {
+        sha: await gitBlobSha(bytes),
+        size: bytes.byteLength,
+      };
+    }
+    for (const { path, remotePath } of deletes) {
+      tree.push({ path: remotePath, mode: "100644", type: "blob", sha: null });
+      delete remote[path];
     }
     if (tree.length === 0) return { remote };
     this.onStatusUpdate?.("creating remote tree...");
@@ -576,15 +619,13 @@ export class GithubClient {
       base_tree: remoteInfo.treeSha,
       tree,
     });
-    
+
     this.onStatusUpdate?.("creating git commit...");
     const commit = await this.github<{ sha: string }>("POST", "/git/commits", {
       message: `Obsidian sync ${new Date().toISOString()}`,
-      tree: newTree.sha,
+      tree: assertGitSha(newTree.sha, "tree SHA"),
       parents: [remoteInfo.headSha],
-      // Manual/Obsidian-side commits stay visibly Shaun's (author = committer).
-      // (Commits this plugin makes on its own behalf are not a thing; the
-      // only automated path is the sync itself.)
+      // Sync commits are the user's own work, so author = committer.
       author: {
         name: settings.authorName,
         email: settings.authorEmail,
@@ -594,30 +635,30 @@ export class GithubClient {
         email: settings.authorEmail,
       },
     });
-    
+    const commitSha = assertGitSha(commit.sha, "commit SHA");
+
     this.onStatusUpdate?.("pushing reference patch...");
     try {
       await this.github(
         "PATCH",
         `/git/refs/heads/${encodeURIComponent(settings.branch)}`,
         {
-          sha: commit.sha,
+          sha: commitSha,
           force: false,
         },
       );
     } catch (error) {
       const status = error instanceof GithubApiError ? error.status : 0;
-      // Only genuine concurrent-write races (someone else pushed first) are
-      // retried. Throttling (403/429), auth failures, and everything else
-      // must NOT be replayed immediately.
-      if (status === 409 || status === 422) {
+      // Only a genuine concurrent-write race (the branch moved under us) is
+      // replayed. Throttling, auth failures, and a 409/422 with the branch
+      // still where we left it must NOT be retried.
+      if ((status === 409 || status === 422) && (await this.branchHead()) !== remoteInfo.headSha)
         throw new RemoteAdvancedError(
           error instanceof Error ? error.message : String(error),
         );
-      }
       throw error;
     }
-    return { remote, commitSha: commit.sha };
+    return { remote, commitSha };
   }
 
   async checkDeviceToken(
