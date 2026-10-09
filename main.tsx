@@ -49,11 +49,16 @@ export type SyncReason =
 /** Sync triggers that may open modals; everything else is background. */
 const INTERACTIVE_REASONS = new Set<SyncReason>(["manual", "force", "settings", "panel"]);
 
-/** Union of two plans keyed by path; an entry in `later` replaces `first`. */
+/** Union of two plans; an entry in `later` replaces `first` for the same key. */
 function mergeChangesByPath(first: Change[], later: Change[]): Change[] {
-  const byPath = new Map<string, Change>();
-  for (const c of [...first, ...later]) byPath.set(c.path, c);
-  return [...byPath.values()];
+  const byKey = new Map<string, Change>();
+  // downloadConflictCopy writes a distinct file (timestamped copy path), so
+  // it must not be deduped against the upload of the original path that a
+  // keep-both resolution also emits.
+  const keyOf = (c: Change) =>
+    c.type === "downloadConflictCopy" ? `downloadConflictCopy:${c.path}` : c.path;
+  for (const c of [...first, ...later]) byKey.set(keyOf(c), c);
+  return [...byKey.values()];
 }
 
 export default class VaultSyncPlugin extends Plugin {
