@@ -8,75 +8,123 @@ on:
         required: true
         type: string
 
+# All `uses:` entries are pinned to the commit SHA of the referenced major tag
+# (verified 2026-10-09); bump deliberately, not via floating tags.
+
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate version
+        run: |
+          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $RELEASE_VERSION (expected e.g. 1.0.1)" >&2
+            exit 1
+          fi
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Bump manifest.json and versions.json
+        # Version travels via env, never interpolated into code: the
+        # workflow_dispatch input is writer-controlled and must not reach a
+        # shell or JS string literal.
+        run: |
+          node -e "
+            const fs = require('fs');
+            const version = process.env.RELEASE_VERSION;
+            const manifest = JSON.parse(fs.readFileSync('./manifest.json', 'utf8'));
+            manifest.version = version;
+            fs.writeFileSync('./manifest.json', JSON.stringify(manifest, null, 2) + '\n');
+            const vPath = './versions.json';
+            const versions = fs.existsSync(vPath) ? JSON.parse(fs.readFileSync(vPath, 'utf8')) : {};
+            versions[version] = manifest.minAppVersion;
+            fs.writeFileSync(vPath, JSON.stringify(versions, null, 2) + '\n');
+            console.log('version set to', version);
+          "
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+
+      - name: Build plugin
+        run: bun run build
+
+      - name: Upload plugin artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin
+          path: |
+            main.js
+            manifest.json
+            styles.css
+            versions.json
+
   release:
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Download plugin artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          bun-version: latest
+          name: plugin
 
-      - name: Install dependencies
-        run: bun install
-
-      - name: Bump manifest.json and versions.json
+      - name: Validate version
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          node -e "
-            const fs = require('fs');
+          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
 
-            // Update manifest.json
-            const manifest = JSON.parse(fs.readFileSync('./manifest.json', 'utf8'));
-            manifest.version = '$VERSION';
-            fs.writeFileSync('./manifest.json', JSON.stringify(manifest, null, 2) + '\n');
-            console.log('manifest.json version set to', manifest.version);
-
-            // Update versions.json
-            const vPath = './versions.json';
-            const versions = fs.existsSync(vPath) ? JSON.parse(fs.readFileSync(vPath, 'utf8')) : {};
-            versions['$VERSION'] = manifest.minAppVersion;
-            fs.writeFileSync(vPath, JSON.stringify(versions, null, 2) + '\n');
-            console.log('versions.json updated:', versions);
-          "
-
-      - name: Build plugin
-        run: bun run build
-
-      - name: Update bun lockfile
-        run: |
-          bun install
-
-      - name: Commit version bumps and lockfile
+      - name: Commit version bumps
+        # Artifacts were downloaded over the checkout, so the bumped
+        # manifest.json / versions.json are already in place.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add manifest.json versions.json bun.lock
-          git diff --staged --quiet || git commit -m "chore: release ${{ github.event.inputs.version }}"
+          git add manifest.json versions.json
+          git diff --staged --quiet || git commit -m "chore: release $RELEASE_VERSION"
           git push
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: |
             main.js
+            manifest.json
             styles.css
 
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ github.event.inputs.version }}
-          name: ${{ github.event.inputs.version }}
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
           draft: true
           generate_release_notes: true
           files: |
