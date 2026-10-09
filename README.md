@@ -33,18 +33,28 @@ In Obsidian: Settings → **VaultSync**.
 
 1. Paste your GitHub App **client ID**.
 2. Click **Sign in with GitHub**, enter the code at `github.com/login/device`.
-3. Set **Repository** to your vault repo (e.g. `vault`), **Branch** to `main`.
+3. Set **Repository name** to your vault repo (e.g. `vault`) and **Branch** to `main`. If the repo doesn't exist yet, use the **Create repository** button — syncing never creates repositories on its own, so a typo'd name fails loudly instead of becoming an empty repo.
 4. Leave **Root path** empty to sync the repository root. Turn on **Nest under vault-name folder** only if you want the old SuperSync layout.
 5. Hit **Sync now**. The first sync downloads the repo into the vault (or uploads the vault, if the repo is empty).
 
-Each device signs in separately — tokens are per-device, so you can revoke one without affecting the others. The token itself is stored locally and never synced to the repo.
+Each device signs in separately — tokens are per-device, so you can revoke one without affecting the others. The token itself is stored locally and never synced to the repo. "Forget on this device" removes the tokens locally; to revoke them on GitHub's side, open github.com → Settings → Applications → Authorized GitHub Apps.
 
 ## Sync behavior
 
-- **Automatic**: on startup, after file changes (3s debounce), and on a timer (default 5 minutes). All configurable.
-- **Conflicts**: if a file changed on both sides, you choose per file — keep local, keep remote, or keep both (remote saved as `name.conflict-<timestamp>.ext`). Nothing is ever silently overwritten.
-- **Deletes** propagate both ways. **File history**: browse a note's past versions from its commits and restore from the plugin.
-- **Ignore rules**: glob-ish patterns, one per line. Defaults ignore `.git/`, `.trash/`, workspace state, the plugin's own token file, and `.DS_Store`.
+- **Automatic**: on startup, after file changes (3s debounce), and on a timer (default 5 minutes). All configurable. Auto-sync pauses while GitHub rate-limits you.
+- **Conflicts**: if a file changed on both sides, you choose per file — keep local, keep remote, or keep both (remote saved as `name.conflict-<timestamp>.ext`). Cancelling the dialog cancels the sync; it never silently picks for you.
+- **Deletes** propagate both ways, with local backups. **File history**: browse a note's past versions from its commits and restore from the plugin (the live file is backed up first).
+- **Backups**: overwritten and deleted files are copied under `.github-sync-backup/<timestamp>/` (local only, never uploaded, pruned after 30 days).
+- **Ignore rules**: glob-ish patterns, one per line. Defaults ignore `.git/`, `.trash/`, `.github-sync-backup/`, workspace state, and `.DS_Store`.
+
+## Security model
+
+- The plugin's own folder (`.obsidian/plugins/vaultsync/`, including its token file) is **never synced**, enforced in code — not via the editable ignore list.
+- No JavaScript under the Obsidian config dir is ever downloaded or uploaded, so a hostile commit can't replace executable plugin code.
+- Obsidian settings sync is an allowlist (`app.json`, `appearance.json`, `core-plugins.json`, `hotkeys.json`); community plugin folders sync only if you opt in, excluding their `data.json` files unless you separately opt those in too.
+- Remote file paths are validated (`..`, absolute paths, control characters, Windows-reserved names, etc. are rejected) and every local write is containment-checked against the vault root.
+- Downloads fetch immutable blob SHAs and verify the hash before writing.
+- Changing the repository/branch/path resets the sync baseline, and a sync that would delete >25% of local files asks for confirmation first.
 
 ## Development
 

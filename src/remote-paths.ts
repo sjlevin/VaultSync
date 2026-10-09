@@ -6,6 +6,50 @@ function normalizePathLikeObsidian(path: string): string {
     .join("/");
 }
 
+/**
+ * Non-configurable deny list for config-dir paths. A hostile commit must
+ * never be able to replace this plugin's own code (RCE on next launch) or
+ * exfiltrate its token file, and no JavaScript may flow in either direction
+ * under the config dir. Kept as a pure function so the rule is unit-tested
+ * and cannot be weakened through the ignore-patterns textarea.
+ */
+export function isHardDeniedPath(
+  path: string,
+  configDir: string,
+  pluginId: string,
+): boolean {
+  const pluginDir = `${configDir}/plugins/${pluginId}`;
+  if (path === pluginDir || path.startsWith(pluginDir + "/")) return true;
+  if (path.startsWith(configDir + "/") && path.toLowerCase().endsWith(".js"))
+    return true;
+  return false;
+}
+
+/** Windows reserved device names (also rejected by GitHub on push). */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+/**
+ * Defense in depth for remote-controlled paths. GitHub's tree API and git
+ * fsck normally reject entries like `..`, but a hostile or buggy remote must
+ * never be able to make us write outside the vault. Returns false for any
+ * segment that is empty/dot-dot, contains control chars (incl. NUL) or
+ * Windows-invalid characters, ends in dot/space, or is a reserved device
+ * name. Also rejects absolute paths and drive-letter prefixes outright.
+ */
+export function isSafePath(path: string): boolean {
+  if (!path || path.startsWith("/") || /^[a-zA-Z]:/.test(path)) return false;
+  const segments = path.normalize("NFC").split("/");
+  for (const seg of segments) {
+    if (!seg || seg === "." || seg === "..") return false;
+    // eslint-disable-next-line no-control-regex
+    if (/[\0-\x1f\x7f]/.test(seg)) return false;
+    if (/[<>:"|?*]/.test(seg)) return false;
+    if (/[. ]$/.test(seg)) return false;
+    if (WINDOWS_RESERVED.test(seg)) return false;
+  }
+  return true;
+}
+
 function cleanRemoteRootSegment(segment: string): string {
   return segment
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
@@ -17,7 +61,8 @@ function cleanRemoteRootPath(path: string): string {
     .replace(/\\/g, "/")
     .split("/")
     .map(cleanRemoteRootSegment)
-    .filter(Boolean)
+    // Dot segments are meaningless in a repo prefix and `..` could escape it.
+    .filter((seg) => seg && seg !== "." && seg !== "..")
     .join("/");
 }
 
@@ -47,7 +92,12 @@ export function remotePath(prefix: string, path: string): string {
 }
 
 export function localPath(prefix: string, path: string): string | null {
+  // Reject absolute/drive paths on the RAW input, before normalization
+  // strips the leading slash and hides the evidence.
+  if (path.startsWith("/") || path.startsWith("\\") || /^[a-zA-Z]:/.test(path))
+    return null;
   const p = normalizePathLikeObsidian(path);
+  if (!isSafePath(p)) return null;
 
   // Empty prefix: the whole repository is this vault's scope.
   if (!prefix) return p;

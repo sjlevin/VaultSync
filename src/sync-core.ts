@@ -99,3 +99,61 @@ export function planPullChanges(
   }
   return changes;
 }
+
+/** Share of local files above which a deleteLocal plan needs confirmation. */
+export const MASS_DELETE_FRACTION = 0.25;
+
+export function exceedsMassDeleteThreshold(
+  deleteLocalCount: number,
+  localFileCount: number,
+): boolean {
+  return (
+    deleteLocalCount > 1 && deleteLocalCount > localFileCount * MASS_DELETE_FRACTION
+  );
+}
+
+/**
+ * Merge the post-sync local and remote states into the next manifest.
+ *
+ * `pendingDownloads` holds paths this sync planned to download but that are
+ * absent from `local` (download not yet applied, or the mobile file index
+ * lagging). Those must NOT be tombstoned: a tombstone
+ * ({sha:"", remoteSha}) makes the next planChanges emit `deleteRemote` for
+ * them — deleting from GitHub what the other side just added.
+ */
+export function nextManifest(
+  local: Manifest,
+  remote: RemoteTree,
+  isIgnored: (path: string) => boolean = () => false,
+  pendingDownloads: Set<string> = new Set(),
+): Manifest {
+  const next: Manifest = {};
+  for (const path of new Set([...Object.keys(local), ...Object.keys(remote)])) {
+    if (isIgnored(path)) continue;
+    if (local[path] && remote[path]) {
+      // Use the remote SHA (the version actually synced) as the base for both
+      // local and remote in the manifest. If the local file was modified
+      // concurrently during sync, its current localSha will differ from the
+      // remoteSha, correctly prompting an upload in the next sync.
+      const remoteSha = remote[path].sha;
+      next[path] = {
+        sha: remoteSha,
+        remoteSha: remoteSha,
+        size: remote[path].size ?? local[path].size,
+      };
+    } else if (!local[path] && remote[path]) {
+      if (pendingDownloads.has(path)) continue;
+      // File exists on remote but was deleted locally. Record a tombstone so
+      // the next sync knows the deletion was intentional and plans
+      // deleteRemote instead of re-downloading the file.
+      next[path] = {
+        sha: "",
+        remoteSha: remote[path].sha,
+        size: remote[path].size,
+      };
+    }
+    // If local[path] exists but remote[path] doesn't, the file is
+    // local-only (upload pending) — don't add to the manifest yet.
+  }
+  return next;
+}

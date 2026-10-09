@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import { Settings, DEFAULT_SETTINGS } from "../types";
 import type VaultSyncPlugin from "../../main";
 
@@ -19,10 +19,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
     if (isAuthorized) {
       new Setting(containerEl)
         .setName("GitHub signed in")
-        .setDesc("You are authenticated with GitHub.")
+        .setDesc(
+          "You are authenticated with GitHub on this device. Forgetting removes the tokens from this device only — to revoke them on GitHub's side, open github.com → Settings → Applications → Authorized GitHub Apps.",
+        )
         .addButton((button) =>
           button
-            .setButtonText("Sign out")
+            .setButtonText("Forget on this device")
             .setWarning()
             .onClick(async () => {
               this.plugin.settings.token = "";
@@ -48,6 +50,41 @@ export class VaultSyncSettingTab extends PluginSettingTab {
         );
     }
     this.repoLink();
+    this.text(
+      "Repository name",
+      "Name of the GitHub repository holding this vault. The GitHub App must be installed on it. Syncing never creates a repository implicitly — use the button below if you need one.",
+      "repo",
+    );
+    this.text(
+      "Branch",
+      "Branch to sync with (default: main).",
+      "branch",
+    );
+    new Setting(containerEl)
+      .setName("Create repository on GitHub")
+      .setDesc(
+        "Creates a new private repository with the name above, then install your GitHub App on it. Explicit on purpose: a typo'd name must never silently become an empty repo.",
+      )
+      .addButton((button) =>
+        button.setButtonText("Create repository").onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await this.plugin.githubClient.createRepository();
+            new Notice(
+              `Repository ${this.plugin.settings.repo} created. Install your GitHub App on it, then sync.`,
+              8000,
+            );
+            this.display();
+          } catch (error) {
+            new Notice(
+              `Create failed: ${error instanceof Error ? error.message : String(error)}`,
+              10000,
+            );
+          } finally {
+            button.setDisabled(false);
+          }
+        }),
+      );
     this.text(
       "GitHub App client ID",
       "Client ID of your GitHub App (github.com → Settings → Developer settings → GitHub Apps → your app). The app needs Contents read/write permission and device flow enabled. Everyone using this plugin creates their own app — it takes a few minutes.",
@@ -79,13 +116,18 @@ export class VaultSyncSettingTab extends PluginSettingTab {
     );
     this.toggle(
       `Sync configuration folder (${this.app.vault.configDir})`,
-      "Includes settings, themes, snippets, canvas metadata, etc. Workspace files still ignored by default.",
+      "Syncs a small allowlist of Obsidian settings files (app, appearance, core plugins, hotkeys). Never syncs this plugin's own folder or any JavaScript.",
       "syncObsidianConfig",
     );
     this.toggle(
       "Sync community plugins",
-      "Disabled by default. Enable only if all devices should share installed plugin files.",
+      "Sync plugin folders across devices, except JavaScript files (never synced) and this plugin's own folder.",
       "syncCommunityPlugins",
+    );
+    this.toggle(
+      "Sync plugins' data.json files",
+      "data.json often holds API keys. Off by default; enable only if you want plugin settings synced too.",
+      "syncPluginDataJson",
     );
     this.text("Commit author name", "Name recorded as the author of sync commits.", "authorName");
     this.text("Commit author email", "Email recorded as the author of sync commits.", "authorEmail");

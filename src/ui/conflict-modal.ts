@@ -1,14 +1,22 @@
 import { App, Modal, Setting, Notice, TFile } from "obsidian";
 import { Change } from "../sync-core";
 import { ConflictResolution } from "../types";
-import { conflictDescription, generateDiff, stripFrontmatter, isBinaryFile } from "../utils/helpers";
+import { conflictDescription, generateDiff, truncateForPreview, isBinaryFile } from "../utils/helpers";
 import type VaultSyncPlugin from "../../main";
 
-
+/** Thrown when the user cancels out of the conflict modal: aborts the sync. */
+export class UserCancelledError extends Error {
+  constructor(message = "Sync cancelled by user.") {
+    super(message);
+    this.name = "UserCancelledError";
+  }
+}
 
 export class ConflictModal extends Modal {
   private result?: Map<string, ConflictResolution>;
   private resolver?: (value: Map<string, ConflictResolution>) => void;
+  private rejecter?: (reason: Error) => void;
+  private cancelled = false;
   private choices = new Map<string, ConflictResolution>();
 
   constructor(
@@ -22,8 +30,9 @@ export class ConflictModal extends Modal {
 
   resolve(): Promise<Map<string, ConflictResolution>> {
     this.open();
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this.resolver = resolve;
+      this.rejecter = reject;
     });
   }
 
@@ -111,7 +120,10 @@ export class ConflictModal extends Modal {
 
     new Setting(contentEl)
       .addButton((button) =>
-        button.setButtonText("Cancel sync").onClick(() => this.close()),
+        button.setButtonText("Cancel sync").onClick(() => {
+          this.cancelled = true;
+          this.close();
+        }),
       )
       .addButton((button) =>
         button
@@ -126,15 +138,14 @@ export class ConflictModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
-    this.resolver?.(
-      this.result ??
-        new Map(
-          this.conflicts.map((conflict) => [
-            conflict.path,
-            "both" as ConflictResolution,
-          ]),
-        ),
-    );
+    // Closing without applying (Cancel button, Escape, or clicking outside)
+    // aborts the sync. It must NOT silently resolve every conflict as
+    // "both" — combined with force-sync that floods both sides with copies.
+    if (this.cancelled || !this.result) {
+      this.rejecter?.(new UserCancelledError());
+      return;
+    }
+    this.resolver?.(this.result);
   }
 
   private async renderDiff(
@@ -152,17 +163,22 @@ export class ConflictModal extends Modal {
     let remoteText = "";
     if (conflict.remoteSha) {
       try {
-        const remoteBytes = await this.plugin.githubClient.downloadBytes(conflict.path);
+        const remoteBytes = await this.plugin.githubClient.downloadBytes(
+          conflict.path,
+          conflict.remoteSha,
+        );
         remoteText = new TextDecoder().decode(remoteBytes);
       } catch (e) {
         remoteText = `[Failed to download remote file: ${e instanceof Error ? e.message : String(e)}]`;
       }
     }
 
-    const cleanLocal = stripFrontmatter(localText);
-    const cleanRemote = stripFrontmatter(remoteText);
+    // Diff the FULL text, including frontmatter: an attacker-controlled
+    // property edit must never show as "identical".
+    const localPreview = truncateForPreview(localText);
+    const remotePreview = truncateForPreview(remoteText);
 
-    if (cleanLocal === cleanRemote) {
+    if (localPreview === remotePreview) {
       const msg = container.createDiv();
       msg.setText("File contents are identical (conflict is metadata-only).");
       msg.setCssStyles({
@@ -172,7 +188,7 @@ export class ConflictModal extends Modal {
       return;
     }
 
-    const diffLines = generateDiff(cleanLocal, cleanRemote);
+    const diffLines = generateDiff(localPreview, remotePreview);
     for (const line of diffLines) {
       const lineEl = container.createDiv();
       lineEl.setCssStyles({

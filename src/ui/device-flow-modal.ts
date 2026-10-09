@@ -78,7 +78,12 @@ export class DeviceFlowModal extends Modal {
         button
           .setButtonText("Open GitHub")
           .setCta()
-          .onClick(() => window.open(this.device.verification_uri)),
+          .onClick(() => {
+            // Never open an unchecked URL from an API response.
+            const uri = this.device.verification_uri;
+            if (/^https:\/\/github\.com\//.test(uri)) window.open(uri);
+            else new Notice(`Unexpected verification URL: ${uri}`, 10000);
+          }),
       );
 
     // Separator line
@@ -160,11 +165,13 @@ export class DeviceFlowModal extends Modal {
     if (this.isChecking || this.isClosed) return;
     if (this.checkNowBtnEl) {
       this.checkNowBtnEl.disabled = true;
+      // Respect slow_down: re-enable only after the current poll interval.
+      const reenableMs = Math.max(5000, this.intervalSeconds * 1000);
       window.setTimeout(() => {
         if (!this.isClosed && this.checkNowBtnEl) {
           this.checkNowBtnEl.disabled = false;
         }
-      }, 5000);
+      }, reenableMs);
     }
     this.countdown = 0;
     this.countdownEl.setText("(checking now...)");
@@ -209,6 +216,11 @@ export class DeviceFlowModal extends Modal {
       }
     } catch (error) {
       console.error("Error checking device token:", error);
+      // Network failure: back off for a full interval instead of retrying
+      // on the next 1s tick.
+      this.countdown = this.intervalSeconds;
+      this.statusEl.setText("Network error — retrying... ");
+      this.countdownEl.setText(`(checking in ${this.countdown}s)`);
     } finally {
       this.isChecking = false;
       if (!this.isClosed) {

@@ -9,6 +9,12 @@ export interface Settings {
   owner: string;
   repo: string;
   branch: string;
+  /**
+   * Fingerprint of {owner, repo, branch, rootPath, nestUnderVaultName} from
+   * the last sync. When it changes, the manifest is reset: the old manifest
+   * describes a different remote, and reusing it could plan a mass delete.
+   */
+  syncScope: string;
   rootPath: string;
   nestUnderVaultName: boolean;
   authorName: string;
@@ -19,6 +25,8 @@ export interface Settings {
   intervalMinutes: number;
   syncObsidianConfig: boolean;
   syncCommunityPlugins: boolean;
+  /** When community-plugin sync is on, also sync plugins' data.json files. */
+  syncPluginDataJson: boolean;
   ignorePatterns: string;
 }
 
@@ -68,8 +76,9 @@ export const DEFAULT_SETTINGS: Settings = {
   tokenExpiresAt: 0,
   deviceFlowClientId: "Iv23liCtNaUnNil38AO1",
   owner: "",
-  repo: "obsidian-sync",
+  repo: "",
   branch: "main",
+  syncScope: "",
   rootPath: "",
   nestUnderVaultName: false,
   authorName: "Shaun Levin",
@@ -80,5 +89,6 @@ export const DEFAULT_SETTINGS: Settings = {
   intervalMinutes: 5,
   syncObsidianConfig: true,
   syncCommunityPlugins: false,
+  syncPluginDataJson: false,
   ignorePatterns: "",
 };

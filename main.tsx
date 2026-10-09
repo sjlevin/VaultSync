@@ -9,6 +9,9 @@ import {
   Change,
   Manifest,
   RemoteTree,
+  ConflictKind,
+  exceedsMassDeleteThreshold,
+  nextManifest as buildNextManifest,
   planChanges as classifyChanges,
   planPullChanges,
 } from "./src/sync-core";
@@ -23,9 +26,10 @@ import {
   VIEW_TYPE_SYNC_STATUS,
 } from "./src/constants";
 import { VaultHelper } from "./src/utils/vault";
-import { GithubClient } from "./src/utils/github";
+import { GithubClient, GithubApiError } from "./src/utils/github";
 import { gitBlobSha } from "./src/utils/helpers";
-import { ConflictModal } from "./src/ui/conflict-modal";
+import { ConflictModal, UserCancelledError } from "./src/ui/conflict-modal";
+import { ConfirmModal } from "./src/ui/confirm-modal";
 import { SyncLogModal } from "./src/ui/sync-log-modal";
 import { DeviceFlowModal } from "./src/ui/device-flow-modal";
 import { VersionRestoreModal } from "./src/ui/version-restore-modal";
@@ -38,6 +42,8 @@ export default class VaultSyncPlugin extends Plugin {
   vaultHelper!: VaultHelper;
   githubClient!: GithubClient;
   settingTab?: VaultSyncSettingTab;
+  /** Auto-sync stays paused until this timestamp after GitHub throttles us. */
+  private throttledUntil = 0;
   
   private syncing = false;
   private queued = false;
@@ -77,8 +83,9 @@ export default class VaultSyncPlugin extends Plugin {
       loadedSettings.ignorePatterns = [
         ".git/**",
         ".trash/**",
+        // Local-only: conflict/delete backups are never uploaded.
+        ".github-sync-backup/**",
         `${this.app.vault.configDir}/workspace*.json`,
-        `${this.app.vault.configDir}/plugins/vaultsync/data.json`,
         ".DS_Store",
       ].join("\n");
     }
@@ -109,23 +116,15 @@ export default class VaultSyncPlugin extends Plugin {
       id: "sync-now",
       name: "Sync now",
       callback: () => void this.sync("manual"),
-      hotkeys: [
-        {
-          modifiers: ["Mod"],
-          key: "s",
-        },
-      ],
+      // No default hotkey: stealing Mod+S from the editor is hostile, and an
+      // accidental force-sync (which wipes the manifest) floods both sides
+      // with conflict copies.
     });
     this.addCommand({
       id: "force-sync",
       name: "Force sync / fetch updates",
       callback: () => void this.sync("force"),
-      hotkeys: [
-        {
-          modifiers: ["Mod"],
-          key: "r",
-        },
-      ],
+      // No default hotkey (see above).
     });
     this.addCommand({
       id: "pull-changes",
@@ -172,6 +171,8 @@ export default class VaultSyncPlugin extends Plugin {
     this.registerInterval(
       window.setInterval(
         () => {
+          // Back off while GitHub is throttling us.
+          if (Date.now() < this.throttledUntil) return;
           if (this.settings.autoSync && this.settings.intervalMinutes > 0) {
             const now = Date.now();
             const elapsed = now - this.lastSyncTime;
@@ -208,6 +209,8 @@ export default class VaultSyncPlugin extends Plugin {
       }
       new VersionRestoreModal(this.app, this, file, versions, async (version) => {
         const bytes = await this.githubClient.downloadBytesAtCommit(file.path, version.sha);
+        // Back up the live file first: a restore is destructive.
+        await this.vaultHelper.backupLocalFile(file.path);
         await this.vaultHelper.writeVaultFile(file.path, bytes);
         new Notice(`Restored ${file.name} to the version from commit ${version.sha.slice(0, 8)}.`);
       }).open();
@@ -228,7 +231,8 @@ export default class VaultSyncPlugin extends Plugin {
         "/login/device/code",
         {
           client_id: clientId,
-          scope: "repo",
+          // No `scope`: a GitHub App's permissions come from the app's own
+          // configuration, and `repo` would be a broad OAuth scope.
         },
       );
       new DeviceFlowModal(
@@ -291,6 +295,10 @@ export default class VaultSyncPlugin extends Plugin {
     this.vaultHelper.clearPluginWrites();
     await this.ensureFreshToken();
 
+    // Interactive reasons get confirmation modals; background reasons abort
+    // instead of popping UI.
+    const interactive = reason === "manual" || reason === "force";
+
     if (reason === "force") {
       this.syncManifest = {};
       new Notice("Force sync: clearing cache and fetching all updates...");
@@ -303,6 +311,8 @@ export default class VaultSyncPlugin extends Plugin {
 
     try {
       this.validateSettings();
+      await this.resetManifestOnScopeChange();
+
       await this.githubClient.ensureRepositoryReady();
       const [local, remoteInfo] = await Promise.all([
         this.vaultHelper.localManifest(),
@@ -322,7 +332,7 @@ export default class VaultSyncPlugin extends Plugin {
         return;
       }
 
-      const resolvedChanges = await this.resolveConflicts(changes, local);
+      const resolvedChanges = await this.resolveConflicts(changes, local, interactive);
       changesForLog = resolvedChanges;
       const remoteUpdates = await this.applyLocalChanges(
         resolvedChanges,
@@ -339,15 +349,26 @@ export default class VaultSyncPlugin extends Plugin {
           nextRemote,
           () => this.vaultHelper.localManifest(),
           (l, r) => this.planChanges(l, r),
-          (c, l) => this.resolveConflicts(c, l),
+          (c, l) => this.resolveConflicts(c, l, interactive),
+          (c, l) => this.applyLocalChanges(c, l),
         );
         nextRemote = commitResult.remote;
         commitSha = commitResult.commitSha;
       }
 
       const finalLocal = await this.vaultHelper.localManifest();
-      this.syncManifest = this.nextManifest(finalLocal, nextRemote);
+      // Paths we planned to download but that aren't in the local manifest
+      // (download not yet applied, or the mobile file index lagging) must
+      // NOT be tombstoned: the next sync will simply download them again.
+      const pendingDownloads = new Set(
+        resolvedChanges
+          .filter((c) => c.type === "download")
+          .map((c) => c.path),
+      );
+      this.syncManifest = this.nextManifest(finalLocal, nextRemote, pendingDownloads);
       await this.saveSettings();
+      // Prune old local backups (best-effort, never fails the sync).
+      await this.vaultHelper.pruneBackups();
       this.lastSyncAt = new Date().toLocaleString();
       this.lastChangeCount = changes.length;
       this.lastError = "";
@@ -362,6 +383,20 @@ export default class VaultSyncPlugin extends Plugin {
         commitSha,
       );
     } catch (error) {
+      const cancelled = error instanceof UserCancelledError;
+      const throttled =
+        error instanceof GithubApiError &&
+        (error.status === 429 || error.status === 403);
+      if (throttled) {
+        // Pause auto-sync (honoring Retry-After when GitHub sends one)
+        // instead of hammering a throttled endpoint.
+        const pauseMs = error.retryAfterMs ?? 60_000;
+        this.throttledUntil = Date.now() + pauseMs;
+        new Notice(
+          `GitHub rate limit hit — auto-sync paused for ~${Math.max(1, Math.round(pauseMs / 1000))}s.`,
+          8000,
+        );
+      }
       this.recordSyncLog(
         startedAt,
         reason,
@@ -370,7 +405,12 @@ export default class VaultSyncPlugin extends Plugin {
         undefined,
         error instanceof Error ? error.message : String(error),
       );
-      this.fail("Sync failed", error);
+      if (cancelled) {
+        this.setStatus("VaultSync: sync cancelled");
+        new Notice("Sync cancelled.", 4000);
+      } else {
+        this.fail("Sync failed", error);
+      }
     } finally {
       this.syncing = false;
       if (this.queued) void this.sync("queued");
@@ -394,6 +434,7 @@ export default class VaultSyncPlugin extends Plugin {
 
     try {
       this.validateSettings();
+      await this.resetManifestOnScopeChange();
       await this.githubClient.ensureRepositoryReady();
       // Clear manifest so we compare against the true remote state without
       // any stale local baseline that might suppress downloads.
@@ -405,12 +446,25 @@ export default class VaultSyncPlugin extends Plugin {
       ]);
       this.syncManifest = savedManifest;
 
-      const pullChanges = planPullChanges(
+      const rawPull = planPullChanges(
         local,
         remoteInfo.tree,
         savedManifest,
         (path) => this.vaultHelper.isIgnored(path),
       );
+      // A pull must never silently overwrite a locally modified file: any
+      // download where the local file also diverged from the manifest
+      // becomes a real conflict and goes through the conflict modal.
+      const pullChanges: Change[] = rawPull.map((c) => {
+        if (c.type !== "download") return c;
+        const base = savedManifest[c.path];
+        const localEntry = local[c.path];
+        const locallyModified =
+          !!localEntry && localEntry.sha !== (base?.sha ?? null);
+        if (!locallyModified) return c;
+        const kind: ConflictKind = !base ? "both_added" : "both_modified";
+        return { type: "conflict", path: c.path, remoteSha: c.remoteSha, kind };
+      });
 
       changesForLog = pullChanges;
       if (pullChanges.length === 0) {
@@ -420,10 +474,22 @@ export default class VaultSyncPlugin extends Plugin {
         return;
       }
 
-      await this.applyLocalChanges(pullChanges, local);
+      const resolvedPull = await this.resolveConflicts(pullChanges, local, true);
+      // A pull never pushes: drop any upload/deleteRemote resolutions.
+      const pullOnly = resolvedPull.filter(
+        (c) =>
+          c.type === "download" ||
+          c.type === "deleteLocal" ||
+          c.type === "downloadConflictCopy",
+      );
+      changesForLog = pullOnly;
+      await this.applyLocalChanges(pullOnly, local);
 
       const finalLocal = await this.vaultHelper.localManifest();
-      this.syncManifest = this.nextManifest(finalLocal, remoteInfo.tree);
+      const pendingDownloads = new Set(
+        pullOnly.filter((c) => c.type === "download").map((c) => c.path),
+      );
+      this.syncManifest = this.nextManifest(finalLocal, remoteInfo.tree, pendingDownloads);
       await this.saveSettings();
       this.lastSyncAt = new Date().toLocaleString();
       this.lastChangeCount = pullChanges.length;
@@ -450,10 +516,33 @@ export default class VaultSyncPlugin extends Plugin {
   }
 
 
-  private validateSettings() {
+  /**
+   * If the repo/branch/path scope changed since the last sync, the stored
+   * manifest describes a different remote. Reset it and re-baseline instead
+   * of planning against stale state (which can look like a mass delete).
+   */
+  private async resetManifestOnScopeChange(): Promise<void> {
+    const scope = JSON.stringify({
+      owner: this.settings.owner.trim().toLowerCase(),
+      repo: this.settings.repo.trim().toLowerCase(),
+      branch: this.settings.branch.trim(),
+      rootPath: this.settings.rootPath.trim(),
+      nestUnderVaultName: this.settings.nestUnderVaultName,
+    });
+    if (this.settings.syncScope !== scope) {
+      this.syncManifest = {};
+      this.settings.syncScope = scope;
+      await this.saveSettings();
+    }
+  }
+
+  private async validateSettings() {
     if (!this.settings.token.trim())
       throw new Error("GitHub token is required.");
-    if (!this.settings.repo.trim()) this.settings.repo = DEFAULT_SETTINGS.repo;
+    if (!this.settings.repo.trim())
+      throw new Error(
+        "Repository is required. Set it in VaultSync settings (e.g. your vault repo name).",
+      );
     if (!this.settings.branch.trim())
       this.settings.branch = DEFAULT_SETTINGS.branch;
   }
@@ -467,38 +556,65 @@ export default class VaultSyncPlugin extends Plugin {
   private async resolveConflicts(
     changes: Change[],
     local: Manifest,
+    interactive: boolean,
   ): Promise<Change[]> {
     const conflicts = changes.filter((change) => change.type === "conflict") as Array<Extract<Change, { type: "conflict" }>>;
-    if (conflicts.length === 0) return changes;
-    const resolutions = await new ConflictModal(this.app, this, conflicts).resolve();
-    const resolved: Change[] = changes.filter(
-      (change) => change.type !== "conflict",
-    );
-    for (const conflict of conflicts) {
-      const choice = resolutions.get(conflict.path) ?? "both";
-      if (choice === "local") {
-        if (local[conflict.path])
-          resolved.push({ type: "upload", path: conflict.path });
-        else resolved.push({ type: "deleteRemote", path: conflict.path });
-      } else if (choice === "remote") {
-        if (conflict.remoteSha)
-          resolved.push({
-            type: "download",
-            path: conflict.path,
-            remoteSha: conflict.remoteSha,
-          });
-        else resolved.push({ type: "deleteLocal", path: conflict.path });
-      } else {
-        if (conflict.remoteSha)
-          resolved.push({
-            type: "downloadConflictCopy",
-            path: conflict.path,
-            remoteSha: conflict.remoteSha,
-          });
-        if (local[conflict.path])
-          resolved.push({ type: "upload", path: conflict.path });
-        else resolved.push({ type: "deleteRemote", path: conflict.path });
+    let resolved: Change[];
+    if (conflicts.length === 0) {
+      resolved = changes;
+    } else {
+      const resolutions = await new ConflictModal(this.app, this, conflicts).resolve();
+      resolved = changes.filter((change) => change.type !== "conflict");
+      for (const conflict of conflicts) {
+        const choice = resolutions.get(conflict.path) ?? "both";
+        if (choice === "local") {
+          if (local[conflict.path])
+            resolved.push({ type: "upload", path: conflict.path });
+          else resolved.push({ type: "deleteRemote", path: conflict.path });
+        } else if (choice === "remote") {
+          if (conflict.remoteSha)
+            resolved.push({
+              type: "download",
+              path: conflict.path,
+              remoteSha: conflict.remoteSha,
+            });
+          else resolved.push({ type: "deleteLocal", path: conflict.path });
+        } else {
+          if (conflict.remoteSha)
+            resolved.push({
+              type: "downloadConflictCopy",
+              path: conflict.path,
+              remoteSha: conflict.remoteSha,
+            });
+          if (local[conflict.path])
+            resolved.push({ type: "upload", path: conflict.path });
+          else resolved.push({ type: "deleteRemote", path: conflict.path });
+        }
       }
+    }
+
+    // Mass local-delete guard: a plan that deletes a large share of local
+    // files usually means the remote is unexpectedly empty (wrong repo,
+    // wrong branch, emptied repo) — never do it silently.
+    const deleteLocals = resolved.filter((c) => c.type === "deleteLocal");
+    if (exceedsMassDeleteThreshold(deleteLocals.length, Object.keys(local).length)) {
+      const message =
+        `This sync would delete ${deleteLocals.length} of ${Object.keys(local).length} local files. ` +
+        `This usually means the remote repository is empty or the repository settings changed. ` +
+        `Backups are kept under .github-sync-backup/, but review before continuing.`;
+      if (!interactive) {
+        throw new Error(
+          `Refusing to delete ${deleteLocals.length} local files in a background sync. Run "Sync now" to review and confirm.`,
+        );
+      }
+      const confirmed = await new ConfirmModal(
+        this.app,
+        "Delete many local files?",
+        message,
+        "Delete them",
+      ).confirm();
+      if (!confirmed)
+        throw new UserCancelledError("Mass local delete declined.");
     }
     return resolved;
   }
@@ -513,7 +629,7 @@ export default class VaultSyncPlugin extends Plugin {
         await this.vaultHelper.backupLocalFile(change.path);
         await this.vaultHelper.writeVaultFile(
           change.path,
-          await this.githubClient.downloadBytes(change.path),
+          await this.githubClient.downloadBytes(change.path, change.remoteSha),
         );
       }
       if (change.type === "deleteLocal") {
@@ -522,7 +638,7 @@ export default class VaultSyncPlugin extends Plugin {
       }
       if (change.type === "downloadConflictCopy") {
         const conflictPath = this.vaultHelper.conflictPath(change.path);
-        const bytes = await this.githubClient.downloadBytes(change.path);
+        const bytes = await this.githubClient.downloadBytes(change.path, change.remoteSha);
         await this.vaultHelper.writeVaultFile(conflictPath, bytes);
         const sha = await gitBlobSha(bytes);
         updates[conflictPath] = { sha, size: bytes.byteLength };
@@ -532,38 +648,17 @@ export default class VaultSyncPlugin extends Plugin {
     return updates;
   }
 
-  private nextManifest(local: Manifest, remote: RemoteTree): Manifest {
-    const next: Manifest = {};
-    for (const path of new Set([
-      ...Object.keys(local),
-      ...Object.keys(remote),
-    ])) {
-      if (this.vaultHelper.isIgnored(path)) continue;
-      if (local[path] && remote[path]) {
-        // Use the remote SHA (the version actually synced) as the base for both
-        // local and remote in the manifest. If the local file was modified
-        // concurrently during sync, its current localSha will differ from the remoteSha,
-        // correctly prompting an upload in the next sync.
-        const remoteSha = remote[path].sha;
-        next[path] = {
-          sha: remoteSha,
-          remoteSha: remoteSha,
-          size: remote[path].size ?? local[path].size,
-        };
-      } else if (!local[path] && remote[path]) {
-        // File exists on remote but was deleted locally. Record a tombstone so
-        // the next sync knows the deletion was intentional and plans
-        // deleteRemote instead of re-downloading the file.
-        next[path] = {
-          sha: "",
-          remoteSha: remote[path].sha,
-          size: remote[path].size,
-        };
-      }
-      // If local[path] exists but remote[path] doesn't, the file is
-      // local-only (upload pending) — don't add to the manifest yet.
-    }
-    return next;
+  private nextManifest(
+    local: Manifest,
+    remote: RemoteTree,
+    pendingDownloads: Set<string> = new Set(),
+  ): Manifest {
+    return buildNextManifest(
+      local,
+      remote,
+      (path) => this.vaultHelper.isIgnored(path),
+      pendingDownloads,
+    );
   }
 
   private setStatus(text: string) {

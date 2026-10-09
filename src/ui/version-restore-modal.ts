@@ -1,6 +1,6 @@
 import { App, Modal, Setting, Notice, TFile, FuzzySuggestModal } from "obsidian";
 import { VersionEntry } from "../types";
-import { generateDiff, stripFrontmatter } from "../utils/helpers";
+import { generateDiff, truncateForPreview } from "../utils/helpers";
 import type VaultSyncPlugin from "../../main";
 
 export class RestoreConfirmModal extends Modal {
@@ -98,12 +98,13 @@ export class RestoreConfirmModal extends Modal {
     const remoteBytes = await this.plugin.githubClient.downloadBytesAtCommit(this.file.path, this.version.sha);
     const remoteText = new TextDecoder().decode(remoteBytes);
 
-    const cleanLocal = stripFrontmatter(localText);
-    const cleanRemote = stripFrontmatter(remoteText);
+    // Diff the full text, including frontmatter.
+    const localPreview = truncateForPreview(localText);
+    const remotePreview = truncateForPreview(remoteText);
 
     container.empty();
 
-    if (cleanLocal === cleanRemote) {
+    if (localPreview === remotePreview) {
       const msg = container.createDiv();
       msg.setText("File contents are identical.");
       msg.setCssStyles({
@@ -113,7 +114,7 @@ export class RestoreConfirmModal extends Modal {
       return;
     }
 
-    const diffLines = generateDiff(cleanLocal, cleanRemote);
+    const diffLines = generateDiff(localPreview, remotePreview);
     for (const line of diffLines) {
       const lineEl = container.createDiv();
       lineEl.setCssStyles({

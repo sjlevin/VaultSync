@@ -123,12 +123,19 @@ export function generateDiff(oldStr: string, newStr: string): DiffLine[] {
   return result;
 }
 
-export function stripFrontmatter(text: string): string {
-  const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (fmMatch) {
-    return text.slice(fmMatch[0].length);
-  }
-  return text;
+/** Max characters fed into a preview diff. Bounds the O(m*n) diff memory. */
+export const PREVIEW_CHAR_LIMIT = 50_000;
+
+/**
+ * Truncate text for preview rendering. The full file is still synced;
+ * only the on-screen diff is capped.
+ */
+export function truncateForPreview(text: string): string {
+  if (text.length <= PREVIEW_CHAR_LIMIT) return text;
+  return (
+    text.slice(0, PREVIEW_CHAR_LIMIT) +
+    `\n… [preview truncated: showing first ${PREVIEW_CHAR_LIMIT} of ${text.length} characters]`
+  );
 }
 
 export function isBinaryFile(path: string): boolean {
