@@ -6,6 +6,7 @@ export interface Settings {
   repo: string;
   branch: string;
   rootPath: string;
+  nestUnderVaultName: boolean;
   authorName: string;
   authorEmail: string;
   autoSync: boolean;
@@ -54,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   repo: "obsidian-sync",
   branch: "main",
   rootPath: "",
+  nestUnderVaultName: false,
   authorName: "VaultSync",
   authorEmail: "vaultsync@marban.lol",
   autoSync: true,

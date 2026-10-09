@@ -44,7 +44,12 @@ export class VaultSyncSettingTab extends PluginSettingTab {
         );
     }
     this.repoLink();
-    this.text("Root path", "Optional subfolder inside the repo", "rootPath");
+    this.text("Root path", "Optional subfolder inside the repo. Empty means the repository root.", "rootPath");
+    this.toggle(
+      "Nest under vault-name folder",
+      "When off (recommended), the vault syncs to the repository root (plus the root path above). When on, files live under a <vault-name> folder, like the original SuperSync.",
+      "nestUnderVaultName",
+    );
     this.toggle(
       "Automatic sync",
       "Run startup/change/interval syncs",

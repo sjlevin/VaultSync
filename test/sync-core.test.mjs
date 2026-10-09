@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { planChanges, planPullChanges } from "../dist/sync-core.js";
 import {
   detectRemotePrefix,
-  remoteBasePrefix,
+  localPath,
   remotePath,
+  vaultRemotePrefix,
 } from "../dist/remote-paths.js";
 
 const base = { "a.md": { sha: "L1", remoteSha: "R1" } };
@@ -53,14 +54,32 @@ assert.deepEqual(
   [],
 );
 
-assert.equal(remoteBasePrefix("Personal ", ""), "Personal");
-assert.equal(remoteBasePrefix(" Personal\u200b ", " Notes / Mobile "), "Personal/Notes/Mobile");
-assert.equal(remotePath("Personal ", "", "Oi.md"), "Personal/Oi.md");
+assert.equal(vaultRemotePrefix("Personal ", "", true), "Personal");
+assert.equal(vaultRemotePrefix(" Personal\u200b ", " Notes / Mobile ", true), "Personal/Notes/Mobile");
+assert.equal(vaultRemotePrefix("Personal", "", false), "");
+assert.equal(vaultRemotePrefix("Personal", "Notes", false), "Notes");
+assert.equal(remotePath(vaultRemotePrefix("Personal ", "", true), "Oi.md"), "Personal/Oi.md");
+assert.equal(remotePath(vaultRemotePrefix("Personal", "", false), "Oi.md"), "Oi.md");
 assert.equal(
-  detectRemotePrefix("Personal ", "", [
+  localPath(vaultRemotePrefix("Personal", "", false), "Notes/Oi.md"),
+  "Notes/Oi.md",
+);
+assert.equal(
+  localPath(vaultRemotePrefix("Personal", "", true), "Other/Oi.md"),
+  null,
+);
+assert.equal(
+  detectRemotePrefix(vaultRemotePrefix("Personal ", "", true), [
     "Personal /Oi.md",
     "Personal/Procedural Map Generation.md",
   ]),
   "Personal",
+);
+assert.equal(
+  detectRemotePrefix(vaultRemotePrefix("Personal", "", false), [
+    "Notes/Oi.md",
+    "a.md",
+  ]),
+  "",
 );
 console.log("sync-core tests passed");

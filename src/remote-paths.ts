@@ -21,32 +21,37 @@ function cleanRemoteRootPath(path: string): string {
     .join("/");
 }
 
-export function remoteBasePrefix(vaultName: string, rootPath: string): string {
-  return normalizePathLikeObsidian(
-    [cleanRemoteRootSegment(vaultName), cleanRemoteRootPath(rootPath)]
-      .filter(Boolean)
-      .join("/"),
-  );
-}
-
-export function remotePath(vaultName: string, rootPath: string, path: string): string {
-  const p = normalizePathLikeObsidian(path);
-  if (p === "README" || p === "README.md") return p;
-  return normalizePathLikeObsidian(
-    [remoteBasePrefix(vaultName, rootPath), p].filter(Boolean).join("/"),
-  );
-}
-
-export function localPath(
+/**
+ * The repository prefix this vault syncs under.
+ *
+ * When nestUnderVaultName is false (the default), the vault syncs to the
+ * repository root (plus an optional rootPath subfolder) — i.e. repo paths
+ * mirror vault paths 1:1. When true, files live under <vault-name>/[rootPath]/,
+ * matching the original SuperSync layout.
+ */
+export function vaultRemotePrefix(
   vaultName: string,
   rootPath: string,
-  path: string,
-  prefixOverride?: string,
-): string | null {
-  const p = normalizePathLikeObsidian(path);
-  if (p === "README" || p === "README.md") return p;
+  nestUnderVaultName: boolean,
+): string {
+  const parts: string[] = [];
+  if (nestUnderVaultName) parts.push(cleanRemoteRootSegment(vaultName));
+  const root = cleanRemoteRootPath(rootPath);
+  if (root) parts.push(root);
+  return parts.filter(Boolean).join("/");
+}
 
-  const prefix = prefixOverride ?? remoteBasePrefix(vaultName, rootPath);
+export function remotePath(prefix: string, path: string): string {
+  const p = normalizePathLikeObsidian(path);
+  return normalizePathLikeObsidian([prefix, p].filter(Boolean).join("/"));
+}
+
+export function localPath(prefix: string, path: string): string | null {
+  const p = normalizePathLikeObsidian(path);
+
+  // Empty prefix: the whole repository is this vault's scope.
+  if (!prefix) return p;
+
   const pLower = p.toLowerCase();
   const prefixLower = prefix.toLowerCase();
 
@@ -54,12 +59,17 @@ export function localPath(
   return pLower.startsWith(`${prefixLower}/`) ? p.slice(prefix.length + 1) : null;
 }
 
+/**
+ * Given the raw list of paths from GitHub's recursive tree API, find the
+ * remote folder that belongs to this vault. With an empty expected prefix
+ * the repository root itself is the scope.
+ */
 export function detectRemotePrefix(
-  vaultName: string,
-  rootPath: string,
+  expectedPrefix: string,
   remotePaths: string[],
 ): string {
-  const expectedPrefix = remoteBasePrefix(vaultName, rootPath);
+  if (!expectedPrefix) return "";
+
   const expectedLower = expectedPrefix.toLowerCase();
   const candidates = new Set<string>();
 
@@ -78,11 +88,9 @@ export function detectRemotePrefix(
       return rp.slice(0, expectedPrefix.length);
   }
 
-  const vaultLower = vaultName.trim().toLowerCase();
   for (const candidate of candidates) {
-    if (candidate.trim().toLowerCase() === vaultLower) {
-      const root = rootPath.trim();
-      return normalizePathLikeObsidian([candidate.trim(), root].filter(Boolean).join("/"));
+    if (candidate.trim().toLowerCase() === expectedLower) {
+      return candidate.trim();
     }
   }
 

@@ -2,6 +2,7 @@ import { App, Notice, TFile, normalizePath, stringifyYaml } from "obsidian";
 import { Settings } from "../types";
 import { Manifest } from "../sync-core";
 import {
+  vaultRemotePrefix,
   detectRemotePrefix as detectRemotePrefixForVault,
   localPath as localPathForVault,
   remotePath as remotePathForVault,
@@ -50,40 +51,30 @@ export class VaultHelper {
       .filter(Boolean);
   }
 
-  remotePath(path: string): string {
-    return remotePathForVault(
+  /** Repository prefix this vault syncs under ("" = repository root). */
+  prefix(): string {
+    const settings = this.getSettings();
+    return vaultRemotePrefix(
       this.app.vault.getName(),
-      this.getSettings().rootPath,
-      path,
+      settings.rootPath,
+      settings.nestUnderVaultName,
     );
   }
 
+  remotePath(path: string): string {
+    return remotePathForVault(this.prefix(), path);
+  }
+
   localPath(remotePath: string, prefixOverride?: string): string | null {
-    return localPathForVault(
-      this.app.vault.getName(),
-      this.getSettings().rootPath,
-      remotePath,
-      prefixOverride,
-    );
+    return localPathForVault(prefixOverride ?? this.prefix(), remotePath);
   }
 
   /**
    * Given the raw list of paths from GitHub's recursive tree API, find the
-   * remote folder that belongs to this vault. Returns the prefix string to
-   * pass back into localPath().
-   *
-   * Strategy:
-   *  1. Try exact match with the constructed prefix (vaultName[/rootPath]).
-   *  2. Try case-insensitive match with the same prefix.
-   *  3. Fall back to just the vault name, case-insensitive.
-   * This survives rootPath mismatches between devices and name casing quirks.
+   * remote folder that belongs to this vault.
    */
   detectRemotePrefix(remotePaths: string[]): string {
-    return detectRemotePrefixForVault(
-      this.app.vault.getName(),
-      this.getSettings().rootPath,
-      remotePaths,
-    );
+    return detectRemotePrefixForVault(this.prefix(), remotePaths);
   }
 
   conflictPath(path: string): string {
