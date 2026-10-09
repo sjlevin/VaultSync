@@ -1,4 +1,4 @@
-import { App, Notice, TFile, normalizePath, stringifyYaml } from "obsidian";
+import { App, Notice, TFile, normalizePath } from "obsidian";
 import { Settings } from "../types";
 import { Manifest } from "../sync-core";
 import {
@@ -93,98 +93,6 @@ export class VaultHelper {
       : `${path}${suffix}`;
   }
 
-  async getMetadataMapping(): Promise<Record<string, string>> {
-    const path = ".vaultsync-metadata.json";
-    const exists = await this.app.vault.adapter.exists(path);
-    if (!exists) return {};
-    try {
-      const text = await this.app.vault.adapter.read(path);
-      return JSON.parse(text) || {};
-    } catch {
-      return {};
-    }
-  }
-
-  async saveMetadataMapping(mapping: Record<string, string>) {
-    const path = ".vaultsync-metadata.json";
-    const content = JSON.stringify(mapping, null, 2);
-    this.pluginWrites.add(path);
-    await this.app.vault.adapter.write(path, content);
-  }
-
-  async ensureFileMetadata(file: TFile, mapping: Record<string, string>): Promise<{ id: string; bytes: ArrayBuffer }> {
-    let content = await this.app.vault.read(file);
-    const cache = this.app.metadataCache.getFileCache(file);
-    const frontmatter = cache?.frontmatter;
-    
-    let id = frontmatter?.id || mapping[file.path];
-    if (!id) {
-      id = "vaultsync-" + Date.now() + "-" + Math.random().toString(36).substring(2, 7);
-    }
-    
-    if (mapping[file.path] !== id) {
-      mapping[file.path] = id;
-    }
-
-    let needsUpdate = false;
-    let contentWithoutFM = content;
-    
-    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-    if (fmMatch) {
-      contentWithoutFM = content.slice(fmMatch[0].length);
-    }
-
-    // Strip id and title from frontmatter if they exist in file content
-    if (frontmatter && (frontmatter.id || frontmatter.title)) {
-      const newFM = { ...frontmatter };
-      delete newFM.id;
-      delete newFM.title;
-      
-      needsUpdate = true;
-      
-      if (Object.keys(newFM).length > 0) {
-        const yaml = stringifyYaml(newFM).trim();
-        content = `---\n${yaml}\n---\n` + contentWithoutFM;
-      } else {
-        content = contentWithoutFM;
-      }
-    }
-
-    // Clean up title heading if present
-    contentWithoutFM = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/) 
-      ? content.slice(content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)![0].length).trimStart()
-      : content.trimStart();
-      
-    const headingMatch = contentWithoutFM.match(/^#\s+(.*?)\r?\n/);
-    if (headingMatch && headingMatch[1] === file.basename) {
-      contentWithoutFM = contentWithoutFM.slice(headingMatch[0].length).trimStart();
-      needsUpdate = true;
-      
-      const fmMatch2 = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-      if (fmMatch2) {
-        content = fmMatch2[0] + contentWithoutFM;
-      } else {
-        content = contentWithoutFM;
-      }
-    }
-    
-    if (needsUpdate) {
-      this.pluginWrites.add(file.path);
-      await this.app.vault.modify(file, content);
-    }
-    
-    const bytes = new TextEncoder().encode(content).buffer;
-    return { id, bytes };
-  }
-
-  async getFileMetadataOrDefaults(file: TFile, mapping: Record<string, string>): Promise<{ id: string; bytes: ArrayBuffer }> {
-    if (file.extension !== "md") {
-      const bytes = await this.app.vault.readBinary(file);
-      return { id: file.path, bytes };
-    }
-    return this.ensureFileMetadata(file, mapping);
-  }
-
   async listAllSyncablePaths(): Promise<string[]> {
     const paths = this.app.vault.getFiles().map((f) => f.path);
     const settings = this.getSettings();
@@ -221,86 +129,33 @@ export class VaultHelper {
     }
   }
 
+  /**
+   * Build the local manifest: every syncable file hashed as raw bytes.
+   *
+   * VaultSync never modifies note contents — files are synced byte-for-byte.
+   * A rename therefore looks like a delete plus an add; the 3-way merge in
+   * sync-core only flags it as a conflict if the other side also touched the
+   * file, which is the correct conservative behavior.
+   */
   async localManifest(): Promise<Manifest> {
     const result: Manifest = {};
-    const mapping = await this.getMetadataMapping();
-    let needsSave = false;
-
-    // Detect offline renames by matching file hashes
     const syncablePaths = await this.listAllSyncablePaths();
-    const missingPaths = Object.keys(mapping).filter(p => !syncablePaths.includes(p));
-    const untrackedFiles = syncablePaths
-      .map(p => this.app.vault.getAbstractFileByPath(p))
-      .filter((f): f is TFile => f instanceof TFile && f.extension === "md" && !mapping[f.path]);
-    
-    if (missingPaths.length > 0 && untrackedFiles.length > 0) {
-      for (const file of untrackedFiles) {
-        const bytes = await this.app.vault.readBinary(file);
-        const sha = await gitBlobSha(bytes);
-        const matchedPath = missingPaths.find(p => this.getSyncManifest()[p]?.sha === sha);
-        if (matchedPath) {
-          mapping[file.path] = mapping[matchedPath];
-          delete mapping[matchedPath];
-          missingPaths.splice(missingPaths.indexOf(matchedPath), 1);
-          needsSave = true;
-        }
-      }
-    }
-
-    // Clean up any remaining dead paths in the mapping
-    for (const p of missingPaths) {
-      delete mapping[p];
-      needsSave = true;
-    }
 
     for (const path of syncablePaths) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      let sha = "";
-      let size = 0;
-      let id = path;
-
+      let bytes: ArrayBuffer;
       if (file instanceof TFile) {
-        const oldMappingVal = mapping[file.path];
-        const res = await this.getFileMetadataOrDefaults(file, mapping);
-        id = res.id;
-        sha = await gitBlobSha(res.bytes);
-        size = res.bytes.byteLength;
-        if (mapping[file.path] !== oldMappingVal) {
-          needsSave = true;
-        }
+        bytes = await this.app.vault.readBinary(file);
       } else {
         // Hidden file or config file (read directly from adapter)
-        const bytes = await this.app.vault.adapter.readBinary(path);
-        sha = await gitBlobSha(bytes);
-        size = bytes.byteLength;
-        id = path;
+        bytes = await this.app.vault.adapter.readBinary(path);
       }
-
-      this.assertSyncableSize(path, size);
+      const sha = await gitBlobSha(bytes);
+      this.assertSyncableSize(path, bytes.byteLength);
       result[path] = {
         sha,
         remoteSha: this.getSyncManifest()[path]?.remoteSha ?? null,
-        size,
-        id,
-      };
-    }
-
-    if (needsSave) {
-      await this.saveMetadataMapping(mapping);
-    }
-
-    // Manually add the metadata file to the manifest so it gets synced!
-    const metadataPath = ".vaultsync-metadata.json";
-    const exists = await this.app.vault.adapter.exists(metadataPath);
-    if (exists) {
-      const content = await this.app.vault.adapter.read(metadataPath);
-      const bytes = new TextEncoder().encode(content).buffer;
-      const sha = await gitBlobSha(bytes);
-      result[metadataPath] = {
-        sha,
-        remoteSha: this.getSyncManifest()[metadataPath]?.remoteSha ?? null,
         size: bytes.byteLength,
-        id: metadataPath,
       };
     }
 

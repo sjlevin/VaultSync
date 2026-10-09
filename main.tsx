@@ -165,15 +165,7 @@ export default class VaultSyncPlugin extends Plugin {
     );
     this.registerEvent(this.app.vault.on("delete", () => this.onVaultChange()));
     this.registerEvent(
-      this.app.vault.on("rename", async (file, oldPath) => {
-        const mapping = await this.vaultHelper.getMetadataMapping();
-        if (mapping[oldPath]) {
-          mapping[file.path] = mapping[oldPath];
-          delete mapping[oldPath];
-          await this.vaultHelper.saveMetadataMapping(mapping);
-        }
-        this.onVaultChange(file);
-      }),
+      this.app.vault.on("rename", (file) => this.onVaultChange(file)),
     );
     this.lastSyncTime = Date.now();
     this.registerInterval(
