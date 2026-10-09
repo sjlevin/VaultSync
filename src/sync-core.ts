@@ -100,16 +100,38 @@ export function planPullChanges(
   return changes;
 }
 
-/** Share of local files above which a deleteLocal plan needs confirmation. */
+/** Share of files above which a mass-delete plan needs confirmation. */
 export const MASS_DELETE_FRACTION = 0.25;
+/** Absolute delete count that always needs confirmation, however big the vault. */
+export const MASS_DELETE_ABSOLUTE = 10;
 
 export function exceedsMassDeleteThreshold(
-  deleteLocalCount: number,
-  localFileCount: number,
+  deleteCount: number,
+  totalFileCount: number,
 ): boolean {
   return (
-    deleteLocalCount > 1 && deleteLocalCount > localFileCount * MASS_DELETE_FRACTION
+    deleteCount >= 1 &&
+    (deleteCount > totalFileCount * MASS_DELETE_FRACTION ||
+      deleteCount >= MASS_DELETE_ABSOLUTE)
   );
+}
+
+/** Folder name for a backup snapshot: ISO-8601 with `:` and `.` replaced by `-`. */
+export function formatBackupStamp(date: Date): string {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
+const BACKUP_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/;
+
+/** Inverse of formatBackupStamp; null for anything that isn't one of our stamps. */
+export function parseBackupStamp(folderName: string): number | null {
+  const m = BACKUP_STAMP.exec(folderName);
+  if (!m) return null;
+  const time = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
+  if (!Number.isFinite(time)) return null;
+  // Date.parse rolls impossible dates forward (Feb 31 -> Mar 3); only a stamp
+  // that round-trips exactly is one we wrote.
+  return formatBackupStamp(new Date(time)) === folderName ? time : null;
 }
 
 /**

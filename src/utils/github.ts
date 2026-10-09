@@ -2,7 +2,7 @@ import { requestUrl, App, Notice, TFile } from "obsidian";
 import { Settings, DeviceTokenResponse, VersionEntry } from "../types";
 import { RemoteTree, Change, Manifest } from "../sync-core";
 import { VaultHelper } from "./vault";
-import { isSafePath } from "../remote-paths";
+import { isSafePath, canonicalPathKey } from "../remote-paths";
 import {
   sleep,
   encodePath,
@@ -21,9 +21,29 @@ export class GithubApiError extends Error {
     message: string,
     public status: number,
     public retryAfterMs?: number,
+    /** True only when GitHub is rate limiting us; a plain 403 is a permission error. */
+    public rateLimited = false,
   ) {
     super(message);
   }
+}
+
+function header(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  return key === undefined ? undefined : headers[key];
+}
+
+/**
+ * How long GitHub wants us to wait: Retry-After when present, else the
+ * X-RateLimit-Reset epoch. Undefined when neither header is usable.
+ */
+function retryAfterMs(headers: Record<string, string> | undefined): number | undefined {
+  const retryAfter = parseInt(header(headers, "retry-after") ?? "", 10);
+  if (Number.isFinite(retryAfter)) return retryAfter * 1000;
+  const reset = parseInt(header(headers, "x-ratelimit-reset") ?? "", 10);
+  if (Number.isFinite(reset)) return Math.max(0, reset * 1000 - Date.now());
+  return undefined;
 }
 
 export class GithubClient {
@@ -98,20 +118,24 @@ export class GithubClient {
         typeof response.json === "object" && response.json?.message
           ? response.json.message
           : response.text;
-      if (allowFailure)
+      const rateLimited =
+        response.status === 429 ||
+        (response.status === 403 &&
+          (header(response.headers, "x-ratelimit-remaining") === "0" ||
+            /rate limit|abuse/i.test(String(message))));
+      // Throttling is never an "allowed" failure: callers must see it as a
+      // rate limit so auto-sync pauses instead of treating it as a lookup miss.
+      if (allowFailure && !rateLimited)
         return { ok: false, status: response.status, message } as T & {
           ok: boolean;
           status: number;
           message: string;
         };
-      const retryAfterHeader = response.headers?.["retry-after"];
-      const retryAfterSecs = retryAfterHeader
-        ? parseInt(retryAfterHeader, 10)
-        : NaN;
       throw new GithubApiError(
         `GitHub ${method} ${endpoint} failed (${response.status}): ${message}`,
         response.status,
-        Number.isFinite(retryAfterSecs) ? retryAfterSecs * 1000 : undefined,
+        retryAfterMs(response.headers),
+        rateLimited,
       );
     }
     if (allowFailure && typeof response.json === "object")
@@ -303,8 +327,8 @@ export class GithubClient {
     const tree: RemoteTree = {};
     const rawPaths = treeResponse.tree.filter(i => i.type === "blob").map(i => i.path);
     const remotePrefix = this.vaultHelper.detectRemotePrefix(rawPaths);
-    // Case-insensitive collision map: two remote entries must never silently
-    // resolve to the same local file (e.g. case-only duplicates on Windows).
+    // Collision map: two remote entries must never silently resolve to the
+    // same local file (case-only or NFC/NFD-only duplicates).
     const seenLocal = new Map<string, string>();
     const skipped: string[] = [];
     for (const item of treeResponse.tree) {
@@ -315,7 +339,7 @@ export class GithubClient {
       }
       const path = this.vaultHelper.localPath(item.path, remotePrefix);
       if (!path || this.vaultHelper.isIgnored(path)) continue;
-      const collisionKey = path.toLowerCase();
+      const collisionKey = canonicalPathKey(path);
       const firstSeen = seenLocal.get(collisionKey);
       if (firstSeen !== undefined && firstSeen !== item.path) {
         skipped.push(`path collision: ${item.path} collides with ${firstSeen}`);
@@ -386,11 +410,17 @@ export class GithubClient {
     ) as ArrayBuffer;
   }
 
+  /**
+   * Download a file as of `commitSha` (version restore). The contents API
+   * returns the blob SHA alongside the content, so the bytes are verified
+   * against it before they are handed back, like a sync download.
+   */
   async downloadBytesAtCommit(
     path: string,
     commitSha: string,
   ): Promise<ArrayBuffer> {
     const data = await this.github<{
+      sha: string;
       content: string;
       encoding: string;
       size?: number;
@@ -400,20 +430,28 @@ export class GithubClient {
       `/contents/${encodePath(this.vaultHelper.remotePath(path))}?ref=${encodeURIComponent(commitSha)}`,
     );
     if (data.size) this.vaultHelper.assertSyncableSize(path, data.size);
+    let buffer: ArrayBuffer;
     // GitHub returns encoding="none" with a download_url for files >1 MB.
     if (data.encoding === "none" && data.download_url) {
       const response = await requestUrl({ url: data.download_url, method: "GET", throw: false });
       if (response.status < 200 || response.status >= 300)
         throw new Error(`Failed to download ${path} (${response.status})`);
-      return response.arrayBuffer;
+      buffer = response.arrayBuffer;
+    } else {
+      if (data.encoding !== "base64")
+        throw new Error(`Unsupported GitHub content encoding for ${path}`);
+      const bytes = bytesFromBase64(data.content.replace(/\s/g, ""));
+      buffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
     }
-    if (data.encoding !== "base64")
-      throw new Error(`Unsupported GitHub content encoding for ${path}`);
-    const bytes = bytesFromBase64(data.content.replace(/\s/g, ""));
-    return bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength,
-    ) as ArrayBuffer;
+    const actualSha = await gitBlobSha(buffer);
+    if (actualSha !== data.sha)
+      throw new Error(
+        `SHA mismatch downloading ${path}: expected ${data.sha}, got ${actualSha}`,
+      );
+    return buffer;
   }
 
   async fileVersions(path: string): Promise<VersionEntry[]> {
@@ -434,6 +472,12 @@ export class GithubClient {
     }));
   }
 
+  /**
+   * Commit, and on a concurrent-push race replan against the fresh tree and
+   * commit once more. `retryChanges` is the replanned set actually applied
+   * (empty when the first commit went through) so the caller can treat its
+   * downloads as pending in the manifest exactly like first-plan ones.
+   */
   async commitRemoteChangesWithRetry(
     changes: Change[],
     remoteInfo: { headSha: string; treeSha: string; tree: RemoteTree },
@@ -442,9 +486,9 @@ export class GithubClient {
     planChangesCallback: (local: Manifest, tree: RemoteTree) => Change[],
     resolveConflictsCallback: (changes: Change[], local: Manifest) => Promise<Change[]>,
     applyLocalChangesCallback: (changes: Change[], local: Manifest) => Promise<unknown>,
-  ): Promise<{ remote: RemoteTree; commitSha?: string }> {
+  ): Promise<{ remote: RemoteTree; commitSha?: string; retryChanges: Change[] }> {
     try {
-      return await this.commitRemoteChanges(changes, remoteInfo, remote);
+      return { ...(await this.commitRemoteChanges(changes, remoteInfo, remote)), retryChanges: [] };
     } catch (error) {
       if (!(error instanceof RemoteAdvancedError)) throw error;
       const fresh = await this.remoteTree();
@@ -460,7 +504,7 @@ export class GithubClient {
       // other device just pushed.
       await applyLocalChangesCallback(retryChanges, local);
       const retryRemote = { ...fresh.tree };
-      return this.commitRemoteChanges(retryChanges, fresh, retryRemote);
+      return { ...(await this.commitRemoteChanges(retryChanges, fresh, retryRemote)), retryChanges };
     }
   }
 

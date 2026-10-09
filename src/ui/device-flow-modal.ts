@@ -163,19 +163,16 @@ export class DeviceFlowModal extends Modal {
 
   private async triggerImmediateCheck() {
     if (this.isChecking || this.isClosed) return;
-    if (this.checkNowBtnEl) {
-      this.checkNowBtnEl.disabled = true;
-      // Respect slow_down: re-enable only after the current poll interval.
-      const reenableMs = Math.max(5000, this.intervalSeconds * 1000);
-      window.setTimeout(() => {
-        if (!this.isClosed && this.checkNowBtnEl) {
-          this.checkNowBtnEl.disabled = false;
-        }
-      }, reenableMs);
-    }
+    this.checkNowBtnEl.disabled = true;
     this.countdown = 0;
     this.countdownEl.setText("(checking now...)");
     await this.checkToken();
+    if (this.isClosed) return;
+    // Computed after the response: a slow_down reply has just grown the interval.
+    const reenableMs = Math.max(5000, this.intervalSeconds * 1000);
+    window.setTimeout(() => {
+      if (!this.isClosed) this.checkNowBtnEl.disabled = false;
+    }, reenableMs);
   }
 
   private async checkToken() {

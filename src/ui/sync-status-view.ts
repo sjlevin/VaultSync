@@ -51,6 +51,7 @@ export class SyncStatusView extends ItemView {
     // Status Indicator Badge
     const isError = snapshot.status.toLowerCase().includes("failed") || snapshot.status.toLowerCase().includes("error");
     const isSyncing = snapshot.status.toLowerCase().includes("syncing");
+    const needsAttention = Boolean(snapshot.needsAttention);
 
     const badge = header.createSpan();
     badge.setCssStyles({
@@ -84,6 +85,13 @@ export class SyncStatusView extends ItemView {
       });
       dot.setCssStyles({ background: "#f44336" });
       badge.createSpan({ text: "Error" });
+    } else if (needsAttention) {
+      badge.setCssStyles({
+        background: "rgba(255, 152, 0, 0.2)",
+        color: "#ff9800"
+      });
+      dot.setCssStyles({ background: "#ff9800" });
+      badge.createSpan({ text: "Needs attention" });
     } else {
       badge.setCssStyles({
         background: "rgba(76, 175, 80, 0.15)",
@@ -155,6 +163,25 @@ export class SyncStatusView extends ItemView {
       errTitle.setCssStyles({ marginBottom: "4px" });
 
       errorBox.createSpan({ text: snapshot.lastError });
+    }
+
+    // A background sync stepped aside for a decision; Sync Now resolves it.
+    if (needsAttention) {
+      const attentionBox = container.createDiv();
+      attentionBox.setCssStyles({
+        background: "rgba(255, 152, 0, 0.1)",
+        border: "1px solid rgba(255, 152, 0, 0.3)",
+        color: "#ff9800",
+        borderRadius: "6px",
+        padding: "10px 14px",
+        fontSize: "0.85em",
+        marginBottom: "20px",
+        overflowWrap: "anywhere"
+      });
+      const attentionTitle = attentionBox.createDiv();
+      attentionTitle.createEl("strong", { text: "Needs your attention:" });
+      attentionTitle.setCssStyles({ marginBottom: "4px" });
+      attentionBox.createSpan({ text: snapshot.needsAttention });
     }
 
     // Action Buttons Container

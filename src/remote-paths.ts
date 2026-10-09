@@ -7,6 +7,18 @@ function normalizePathLikeObsidian(path: string): string {
 }
 
 /**
+ * Key under which two paths alias the same file on a case-insensitive,
+ * Unicode-normalizing filesystem (macOS, Windows). Every deny/allow/collision
+ * comparison goes through this so `.Obsidian/…` cannot slip past a rule
+ * written for `.obsidian/…`.
+ */
+export function canonicalPathKey(path: string): string {
+  return path.normalize("NFC").toLowerCase();
+}
+
+const CONFIG_DIR_SCRIPT = /\.(js|mjs|cjs)$/;
+
+/**
  * Non-configurable deny list for config-dir paths. A hostile commit must
  * never be able to replace this plugin's own code (RCE on next launch) or
  * exfiltrate its token file, and no JavaScript may flow in either direction
@@ -18,9 +30,11 @@ export function isHardDeniedPath(
   configDir: string,
   pluginId: string,
 ): boolean {
-  const pluginDir = `${configDir}/plugins/${pluginId}`;
-  if (path === pluginDir || path.startsWith(pluginDir + "/")) return true;
-  if (path.startsWith(configDir + "/") && path.toLowerCase().endsWith(".js"))
+  const key = canonicalPathKey(path);
+  const configKey = canonicalPathKey(configDir);
+  const pluginDir = `${configKey}/plugins/${canonicalPathKey(pluginId)}`;
+  if (key === pluginDir || key.startsWith(pluginDir + "/")) return true;
+  if (key.startsWith(configKey + "/") && CONFIG_DIR_SCRIPT.test(key))
     return true;
   return false;
 }

@@ -123,18 +123,25 @@ export function generateDiff(oldStr: string, newStr: string): DiffLine[] {
   return result;
 }
 
-/** Max characters fed into a preview diff. Bounds the O(m*n) diff memory. */
+/** Max characters fed into a preview diff. */
 export const PREVIEW_CHAR_LIMIT = 50_000;
+/** Max lines per side: the LCS diff allocates (m+1)*(n+1) cells. */
+export const PREVIEW_LINE_LIMIT = 2_000;
 
 /**
  * Truncate text for preview rendering. The full file is still synced;
  * only the on-screen diff is capped.
  */
 export function truncateForPreview(text: string): string {
-  if (text.length <= PREVIEW_CHAR_LIMIT) return text;
+  const shown = text.slice(0, PREVIEW_CHAR_LIMIT);
+  const lines = shown.split(/\r?\n/);
+  if (shown.length === text.length && lines.length <= PREVIEW_LINE_LIMIT) return text;
+  // One line is reserved for the marker, so the diff sees at most
+  // PREVIEW_LINE_LIMIT lines.
+  const kept = lines.slice(0, PREVIEW_LINE_LIMIT - 1).join("\n");
   return (
-    text.slice(0, PREVIEW_CHAR_LIMIT) +
-    `\n… [preview truncated: showing first ${PREVIEW_CHAR_LIMIT} of ${text.length} characters]`
+    kept +
+    `\n… [preview truncated: showing first ${kept.length} of ${text.length} characters]`
   );
 }
 

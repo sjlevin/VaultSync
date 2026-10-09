@@ -1,4 +1,6 @@
 {
+  "name": "vaultsync",
+  "version": "0.1.1",
   "scripts": {
     "clean": "rm -f main.js && rm -rf dist",
     "dev": "bun esbuild.config.ts",

@@ -1,6 +1,6 @@
 import { App, Notice, TFile, normalizePath } from "obsidian";
 import { Settings } from "../types";
-import { Manifest } from "../sync-core";
+import { Manifest, formatBackupStamp, parseBackupStamp } from "../sync-core";
 import {
   vaultRemotePrefix,
   detectRemotePrefix as detectRemotePrefixForVault,
@@ -8,6 +8,7 @@ import {
   remotePath as remotePathForVault,
   isSafePath,
   isHardDeniedPath,
+  canonicalPathKey,
 } from "../remote-paths";
 import { gitBlobSha, matchesPattern, formatBytes } from "./helpers";
 import {
@@ -20,10 +21,12 @@ import {
 
 export class VaultHelper {
   public pluginWrites = new Set<string>();
+  private warnedUnsafeLocal = new Set<string>();
 
   /** Call at the start of every sync so stale write-guards don't suppress real user edits. */
   clearPluginWrites() {
     this.pluginWrites.clear();
+    this.warnedUnsafeLocal.clear();
   }
 
   constructor(
@@ -39,8 +42,6 @@ export class VaultHelper {
    * ignore-patterns textarea can never re-enable them.
    */
   isIgnored(path: string): boolean {
-    // NFC-normalize before matching: a non-NFC alias of `.obsidian` must not
-    // slip past the config-dir rules below.
     path = normalizePath(path).normalize("NFC");
     const configDir = this.app.vault.configDir;
     const settings = this.getSettings();
@@ -53,25 +54,29 @@ export class VaultHelper {
     if (isHardDeniedPath(path, configDir, PLUGIN_ID)) return true;
 
     // Config-dir allowlist (replaces the old "sync the whole .obsidian dir").
-    if (path === configDir || path.startsWith(configDir + "/")) {
+    // Compared on canonical keys: `.Obsidian/App.json` is `.obsidian/app.json`
+    // on a case-insensitive filesystem.
+    const key = canonicalPathKey(path);
+    const configKey = canonicalPathKey(configDir);
+    if (key === configKey || key.startsWith(configKey + "/")) {
       // Exact-file allowlist for Obsidian settings sync.
       if (
         settings.syncObsidianConfig &&
         [
-          `${configDir}/app.json`,
-          `${configDir}/appearance.json`,
-          `${configDir}/core-plugins.json`,
-          `${configDir}/hotkeys.json`,
-        ].includes(path)
+          `${configKey}/app.json`,
+          `${configKey}/appearance.json`,
+          `${configKey}/core-plugins.json`,
+          `${configKey}/hotkeys.json`,
+        ].includes(key)
       )
         return false;
       // Community plugin folders (code excluded by hard deny 2 above).
       if (
         settings.syncCommunityPlugins &&
-        path.startsWith(`${configDir}/plugins/`)
+        key.startsWith(`${configKey}/plugins/`)
       ) {
         // Plugin data.json files (often hold API keys) are opt-in.
-        if (path.endsWith("/data.json"))
+        if (key.endsWith("/data.json"))
           return !settings.syncPluginDataJson;
         return false;
       }
@@ -139,12 +144,25 @@ export class VaultHelper {
     // Deduplicate: getFiles() already includes configDir TFiles on some platforms,
     // so scanFolderRecursive can produce duplicates that cause spurious upload loops.
     const seen = new Set<string>();
-    return paths.filter((p) => {
+    const unsafe: string[] = [];
+    const syncable = paths.filter((p) => {
       if (this.isIgnored(p)) return false;
       if (seen.has(p)) return false;
       seen.add(p);
+      // Same rule as for remote entries: a local name we would refuse to
+      // write back must not be uploaded, or every later sync trips on it.
+      if (!isSafePath(p)) {
+        if (!this.warnedUnsafeLocal.has(p)) {
+          this.warnedUnsafeLocal.add(p);
+          unsafe.push(p);
+        }
+        return false;
+      }
       return true;
     });
+    if (unsafe.length)
+      console.warn(`VaultSync skipped local files with unsafe names:\n${unsafe.join("\n")}`);
+    return syncable;
   }
 
   private async scanFolderRecursive(folderPath: string, paths: string[]): Promise<void> {
@@ -287,7 +305,7 @@ export class VaultHelper {
     }
     if (!bytes) return;
     const backupPath = normalizePath(
-      `.github-sync-backup/${new Date().toISOString().replace(CONFLICT_STAMP, "-")}/${path}`,
+      `.github-sync-backup/${formatBackupStamp(new Date())}/${path}`,
     );
     await this.writeVaultFile(backupPath, bytes);
   }
@@ -310,6 +328,7 @@ export class VaultHelper {
 
   /**
    * Delete `.github-sync-backup/` snapshots older than BACKUP_RETENTION_DAYS.
+   * Folders that aren't one of our stamps are left alone.
    * Best-effort: failures are logged, never thrown.
    */
   async pruneBackups(): Promise<void> {
@@ -319,14 +338,12 @@ export class VaultHelper {
       const list = await this.app.vault.adapter.list(root);
       const cutoff = Date.now() - BACKUP_RETENTION_DAYS * 24 * 3600 * 1000;
       for (const folder of list.folders) {
-        const stamp = folder.slice(root.length + 1);
-        const time = Date.parse(stamp);
-        if (!Number.isFinite(time) || time < cutoff) {
-          try {
-            await this.app.vault.adapter.rmdir(folder, true);
-          } catch (e) {
-            console.warn(`VaultSync: failed to prune backup ${folder}:`, e);
-          }
+        const time = parseBackupStamp(folder.slice(root.length + 1));
+        if (time === null || time >= cutoff) continue;
+        try {
+          await this.app.vault.adapter.rmdir(folder, true);
+        } catch (e) {
+          console.warn(`VaultSync: failed to prune backup ${folder}:`, e);
         }
       }
     } catch (e) {

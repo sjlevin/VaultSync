@@ -87,7 +87,7 @@ export class VaultSyncSettingTab extends PluginSettingTab {
       );
     this.text(
       "GitHub App client ID",
-      "Client ID of your GitHub App (github.com → Settings → Developer settings → GitHub Apps → your app). The app needs Contents read/write permission and device flow enabled. Everyone using this plugin creates their own app — it takes a few minutes.",
+      "Defaults to the plugin author's GitHub App. To be independent of it, create your own app (github.com → Settings → Developer settings → GitHub Apps; Contents read/write permission, device flow enabled) and paste its client ID here.",
       "deviceFlowClientId",
     );
     this.text("Root path", "Optional subfolder inside the repo. Empty means the repository root.", "rootPath");

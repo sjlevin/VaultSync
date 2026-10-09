@@ -12,6 +12,17 @@ export class UserCancelledError extends Error {
   }
 }
 
+/**
+ * Thrown by a background sync that needs a decision (conflicts, mass delete)
+ * instead of opening a modal: the user is told to run "Sync now".
+ */
+export class SyncNeedsUserError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SyncNeedsUserError";
+  }
+}
+
 export class ConflictModal extends Modal {
   private result?: Map<string, ConflictResolution>;
   private resolver?: (value: Map<string, ConflictResolution>) => void;

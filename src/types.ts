@@ -40,7 +40,7 @@ export interface SyncLogEntry {
   startedAt: string;
   endedAt: string;
   reason: string;
-  status: "success" | "error";
+  status: "success" | "error" | "needs-user" | "cancelled";
   changes: number;
   uploads: number;
   downloads: number;
