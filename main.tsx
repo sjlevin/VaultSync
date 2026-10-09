@@ -250,27 +250,6 @@ export default class VaultSyncPlugin extends Plugin {
     }
   }
 
-  async ensureReadmeExists() {
-    const oldPath = "README.md";
-    const newPath = "README";
-
-    // Clean up old README.md if it exists
-    const oldFile = this.app.vault.getAbstractFileByPath(oldPath);
-    if (oldFile) {
-      this.vaultHelper.pluginWrites.add(oldPath);
-      await this.app.vault.delete(oldFile, true);
-    }
-
-    const exists = this.app.vault.getAbstractFileByPath(newPath);
-    if (!exists) {
-      this.vaultHelper.pluginWrites.add(newPath);
-      await this.app.vault.create(
-        newPath,
-        `# 🔒 Private Obsidian Vault\n\nThis repository stores a private, secure backup of your Obsidian vault, synchronized automatically by **VaultSync**.\n\n## ⚠️ Important Notes\n* **Keep Private**: This repository contains your personal notes. Do not make this repository public.\n* **Automated Sync**: Files are synced automatically by the VaultSync plugin. Avoid manual modifications to the files directly on GitHub to prevent sync conflicts.\n`,
-      );
-    }
-  }
-
   private onVaultChange(file?: TAbstractFile) {
     if (!this.settings.autoSync || !this.settings.syncOnFileChange) return;
     if (file?.path && this.vaultHelper.isIgnored(file.path)) return;
@@ -307,20 +286,11 @@ export default class VaultSyncPlugin extends Plugin {
     try {
       this.validateSettings();
       await this.githubClient.ensureRepositoryReady();
-      await this.ensureReadmeExists();
       const [local, remoteInfo] = await Promise.all([
         this.vaultHelper.localManifest(),
         this.githubClient.remoteTree(),
       ]);
       const changes = this.planChanges(local, remoteInfo.tree);
-      
-      // Clean up old README.md on remote if it got planned or exists there
-      if (remoteInfo.tree["README.md"] && !local["README.md"]) {
-        const cleanChanges = changes.filter(c => !(c.type === "download" && c.path === "README.md"));
-        cleanChanges.push({ type: "deleteRemote", path: "README.md" });
-        changes.length = 0;
-        changes.push(...cleanChanges);
-      }
       
       changesForLog = changes;
       if (changes.length === 0) {
