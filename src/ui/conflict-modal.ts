@@ -169,6 +169,16 @@ export class ConflictModal extends Modal {
     const localFile = this.app.vault.getAbstractFileByPath(conflict.path);
     if (localFile instanceof TFile) {
       localText = await this.app.vault.read(localFile);
+    } else {
+      // Adapter-only files (hidden folders like .scripts/) are not TFiles;
+      // without this the preview shows an empty local side for them.
+      try {
+        localText = new TextDecoder().decode(
+          await this.app.vault.adapter.readBinary(conflict.path),
+        );
+      } catch {
+        // File absent on disk: leave the preview empty.
+      }
     }
 
     let remoteText = "";

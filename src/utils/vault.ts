@@ -169,6 +169,21 @@ export class VaultHelper {
     if (settings.syncObsidianConfig || settings.syncCommunityPlugins) {
       await this.scanFolderRecursive(this.app.vault.configDir, paths);
     }
+    // getFiles() also misses every other hidden folder: Obsidian's Vault
+    // API only exposes files visible in the app, and files in hidden
+    // folders are adapter-only. Without this scan, a file like
+    // `.scripts/build_booklet.py` is absent from the local manifest while
+    // still present on disk, so a later download of it fails the
+    // unchanged-since-plan check in applyLocalChanges ("changed during
+    // sync and was left alone") on every sync, forever — deleting the
+    // file locally is the only escape, because only then does the disk
+    // (absent) match the manifest (absent). The adapter scan puts such
+    // files in the manifest with their real sha, so the check passes and
+    // the manifest is updated after the download. The config dir is
+    // already scanned above and is skipped here by the isIgnored() guard
+    // in scanFolderRecursive; .git/.trash/.github-sync-backup are
+    // hard-denied, so they are never descended into.
+    await this.scanFolderRecursive("", paths);
     // Deduplicate: getFiles() already includes configDir TFiles on some platforms,
     // so scanFolderRecursive can produce duplicates that cause spurious upload loops.
     const seen = new Set<string>();
@@ -221,7 +236,9 @@ export class VaultHelper {
    * mass local delete and would be pushed as deleteRemote.
    */
   private async scanFolderRecursive(folderPath: string, paths: string[]): Promise<void> {
-    if (!(await this.app.vault.adapter.exists(folderPath))) return;
+    // "" is the vault root; the adapter's exists() is unreliable for it on
+    // some platforms, and the root always exists, so skip that check there.
+    if (folderPath !== "" && !(await this.app.vault.adapter.exists(folderPath))) return;
     const list = await this.app.vault.adapter.list(folderPath);
     paths.push(...list.files);
     for (const folder of list.folders) {
@@ -332,7 +349,16 @@ export class VaultHelper {
     const configKey = canonicalPathKey(this.app.vault.configDir);
     if (existing instanceof TFile) {
       await this.app.vault.modifyBinary(existing, bytes);
-    } else if (canonicalPathKey(path).startsWith(configKey + "/")) {
+    } else if (
+      // Config-dir files, hidden files (e.g. .scripts/*.py, backup files
+      // under .github-sync-backup/), and any file that exists on disk but
+      // is not in Obsidian's index (index lag on mobile) must be written
+      // via the adapter: createBinary() is for new files and fails or
+      // misbehaves on a path that already exists on disk.
+      canonicalPathKey(path).startsWith(configKey + "/") ||
+      path.split("/")[0].startsWith(".") ||
+      (await this.app.vault.adapter.exists(path))
+    ) {
       await this.app.vault.adapter.writeBinary(path, bytes);
     } else {
       await this.app.vault.createBinary(path, bytes);
